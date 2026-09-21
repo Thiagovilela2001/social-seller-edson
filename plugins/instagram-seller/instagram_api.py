@@ -1,58 +1,56 @@
-"""Camada de acesso à Meta Graph API + regras de política.
+"""Camada de acesso à Meta Graph API + última barreira antes da rede.
 
 PRINCÍPIO CENTRAL DESTE ARQUIVO:
-As regras da Meta (janela de 24h, private reply única, kill switch) são
-impostas AQUI, em código, no caminho do envio. Nunca no prompt, e nunca
-APENAS em hook.
+    Toda regra que decide "pode enviar?" é imposta AQUI, em código, no caminho do
+    envio. Nunca no prompt, e nunca APENAS em hook.
 
-Motivo: a issue #100942 do hermes-agent relata que hooks pre_tool_call de
-bloqueio falham ABERTO silenciosamente sob gateway non-TTY. Um guardrail que
-pode não registrar não é um guardrail. Código no caminho do envio não tem
-como "não registrar".
+Motivo: hook pre_tool_call de bloqueio falha ABERTO silenciosamente sob gateway
+non-TTY (hermes-agent #100942). Um guardrail que pode não registrar não é um
+guardrail. Código no caminho do envio não tem como "não registrar".
+
+RELACIONAMENTO COM scripts/instagram-intake.py — defesa em profundidade:
+    o intake decide ANTES do LLM (dedupe, opt-out, A0, sanitização);
+    este arquivo decide DEPOIS do LLM, imediatamente antes da chamada de rede.
+    Camadas independentes: a primeira pode estar desligada, com bug ou contornada
+    por prompt injection, e esta ainda barra. A regra que importa está duplicada
+    de propósito — mas com UMA implementação, em `rules.py`, para as duas não
+    divergirem com o tempo.
+
+Não há caminho de envio que não passe por `_autorizar()`.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
-import sqlite3
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import contextmanager
 from pathlib import Path
+
+# O loader de plugins NÃO põe o diretório do plugin no sys.path — só em
+# module.__path__. Então o import relativo é o caminho real em produção, e o
+# absoluto serve ao harness de teste (spike/run_spike.py) e aos testes.
+try:
+    from . import rules
+except ImportError:  # pragma: no cover - somente fora do contexto de pacote
+    import rules  # type: ignore[no-redef]
+
+_log = logging.getLogger(__name__)
 
 # Versão da Graph API. Fixe e revise periodicamente — a Meta descontinua versões.
 GRAPH_VERSION = os.getenv("IG_GRAPH_VERSION", "v21.0")
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
-# Janela padrão de mensageria do Instagram.
-WINDOW_SECONDS = 24 * 60 * 60
-
-# Private reply: 1 por comentário, até 7 dias.
-PRIVATE_REPLY_MAX_AGE = 7 * 24 * 60 * 60
-
-# Estado do spike. Em produção isto é Postgres (ver docs/01 §5).
+# Reexportados para o resto do plugin. A implementação vive em `rules.py`.
+WINDOW_SECONDS = rules.DM_WINDOW_SECONDS
+PRIVATE_REPLY_MAX_AGE = rules.PRIVATE_REPLY_MAX_AGE
 
 
 def _hermes_home() -> Path:
-    """HERMES_HOME do processo, com fallback ~/.hermes.
-
-    Path.home() nao e a mesma coisa: no Windows o Hermes vive em AppData.
-    """
-    env = os.getenv("HERMES_HOME")
-    return Path(env) if env else Path.home() / ".hermes"
-
-
-STATE_DB = Path(
-    os.getenv("IG_STATE_DB", str(_hermes_home() / "instagram-seller.db"))
-)
-
-# Arquivo-flag do kill switch. O cliente liga/desliga pelo painel.
-KILL_SWITCH = Path(
-    os.getenv("IG_KILL_SWITCH", str(_hermes_home() / "ig-kill-switch"))
-)
+    """HERMES_HOME do profile. Mantido por compatibilidade com o `__init__`."""
+    return rules.hermes_home()
 
 
 class PolicyBlock(Exception):
@@ -60,110 +58,101 @@ class PolicyBlock(Exception):
 
 
 # --------------------------------------------------------------------------
-# Estado
-# --------------------------------------------------------------------------
-
-@contextmanager
-def _db():
-    """Conexão com o estado local, sempre fechada ao sair.
-
-    NÃO use `with sqlite3.connect(...) as conn`: o context manager do sqlite
-    faz commit/rollback mas NÃO fecha a conexão. A conexão vazada mantém o
-    arquivo travado — no Windows isso impede até apagar o diretório.
-    """
-    STATE_DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(STATE_DB)
-    try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS inbound (
-                igsid       TEXT PRIMARY KEY,
-                last_seen   REAL NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS private_replies (
-                comment_id  TEXT PRIMARY KEY,
-                sent_at     REAL NOT NULL
-            )
-            """
-        )
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def record_inbound(igsid: str, ts: float | None = None) -> None:
-    """Chamado pelo script da rota a cada mensagem RECEBIDA do usuário.
-
-    É o que abre (e reabre) a janela de 24h. Sem isso, ig_send_dm sempre falha.
-    """
-    ts = ts or time.time()
-    with _db() as conn:
-        conn.execute(
-            "INSERT INTO inbound (igsid, last_seen) VALUES (?, ?) "
-            "ON CONFLICT(igsid) DO UPDATE SET last_seen = excluded.last_seen",
-            (igsid, ts),
-        )
-
-
-def window_remaining(igsid: str) -> float:
-    """Segundos restantes da janela de 24h. Negativo = expirada."""
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT last_seen FROM inbound WHERE igsid = ?", (igsid,)
-        ).fetchone()
-    if not row:
-        return -1.0
-    return (row[0] + WINDOW_SECONDS) - time.time()
-
-
-# --------------------------------------------------------------------------
-# Guardrails — executados ANTES de qualquer chamada de rede
+# Autorização — o único caminho para um envio
 # --------------------------------------------------------------------------
 
 def _check_kill_switch() -> None:
-    if KILL_SWITCH.exists():
+    alvo = rules.kill_switch_path()
+    if alvo.exists():
         raise PolicyBlock(
-            "Kill switch ativo. Envio bloqueado. "
-            f"Desligue removendo {KILL_SWITCH}."
+            f"Kill switch ativo. Envio bloqueado. Desligue removendo {alvo}."
         )
 
 
+def _check_opt_out(igsid: str, *, permite_despedida: bool = True) -> None:
+    """Opt-out é permanente — com UMA exceção: a despedida privada.
+
+    Se bloqueasse tudo, a despedida em uma linha que a política manda enviar nunca
+    sairia. Se não limitasse, o opt-out não valeria nada. Então: exatamente uma
+    mensagem depois do pedido de parada, e silêncio para sempre.
+
+    `permite_despedida=False` nos canais PÚBLICOS: responder em público quem pediu
+    para ser deixado em paz é pior do que não responder — repete a exposição na
+    frente de todo mundo em vez de encerrar em privado.
+    """
+    if not igsid or not rules.is_opted_out(igsid):
+        return
+    if permite_despedida and rules.pode_enviar_despedida(igsid):
+        return
+    raise PolicyBlock(
+        "Opt-out registrado. Nenhum envio — nem despedida, que já foi enviada. "
+        "Este contato está encerrado de forma permanente."
+    )
+
+
 def _check_window(igsid: str) -> None:
-    remaining = window_remaining(igsid)
-    if remaining <= 0:
+    restante = rules.window_remaining(igsid)
+    if restante <= 0:
         raise PolicyBlock(
-            "Janela de 24h expirada (ou usuário nunca falou com a conta). "
+            "Janela de 24h expirada (ou o usuário nunca falou com a conta). "
             "O Instagram não permite envio. Use WhatsApp/e-mail com consentimento."
         )
 
 
 def _check_private_reply_available(comment_id: str) -> None:
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT sent_at FROM private_replies WHERE comment_id = ?",
-            (comment_id,),
-        ).fetchone()
-    if not row:
+    idade = rules.private_reply_age(comment_id)
+    if idade is None:
         return
-    age = time.time() - row[0]
     raise PolicyBlock(
         "Private reply já consumida para este comentário "
-        f"(enviada há {int(age)}s). São 1 por comentário — não existe retry. "
+        f"(enviada há {int(idade)}s). São 1 por comentário — não existe retry. "
         "De agora em diante, só DM ou resposta pública."
     )
 
 
-def _mark_private_reply_sent(comment_id: str) -> None:
-    with _db() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO private_replies (comment_id, sent_at) VALUES (?, ?)",
-            (comment_id, time.time()),
+def _autorizar(
+    igsid: str = "",
+    *,
+    comment_id: str = "",
+    exige_janela: bool = True,
+    permite_despedida: bool = True,
+) -> None:
+    """Todas as regras que antecedem um envio, em ordem estável.
+
+    A ordem é fixa porque o MOTIVO do bloqueio é a informação mais útil para quem
+    está operando: kill switch e opt-out são mais graves que janela expirada.
+    """
+    _check_kill_switch()
+    if igsid:
+        _check_opt_out(igsid, permite_despedida=permite_despedida)
+    if comment_id:
+        _check_private_reply_available(comment_id)
+    if igsid and exige_janela:
+        _check_window(igsid)
+
+
+def _registrar_envio(
+    *, igsid: str = "", comment_id: str = "", message_id: str = "", acao: str
+) -> None:
+    """Grava `executed_action` DEPOIS do envio confirmado (PDF §13).
+
+    Falha aqui não derruba o envio já feito — o envio é o que importa para o
+    cliente. Mas a falha fica no log, porque perder a trilha de auditoria é o
+    outro lado do problema.
+    """
+    try:
+        if igsid and rules.pode_enviar_despedida(igsid):
+            rules.marcar_despedida_enviada(igsid)
+        marcadas = rules.mark_executed(
+            comment_id=comment_id, message_id=message_id, igsid=igsid, executed=acao
         )
+        if not marcadas:
+            _log.warning(
+                "Envio '%s' sem interação registrada (igsid=%s comment=%s msg=%s)",
+                acao, igsid, comment_id, message_id,
+            )
+    except Exception as exc:  # noqa: BLE001 — auditoria nunca cancela o envio
+        _log.warning("Falha ao registrar execução '%s': %s", acao, exc)
 
 
 # --------------------------------------------------------------------------
@@ -175,10 +164,7 @@ def _post(path: str, payload: dict) -> dict:
     url = f"{GRAPH_BASE}/{path}?access_token={urllib.parse.quote(token)}"
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -191,42 +177,50 @@ def _post(path: str, payload: dict) -> dict:
 
 def send_dm(igsid: str, text: str) -> dict:
     """DM dentro da janela de 24h."""
-    _check_kill_switch()
-    _check_window(igsid)
-
     if not text or not text.strip():
         raise PolicyBlock("Mensagem vazia.")
+    _autorizar(igsid, exige_janela=True)
 
     ig_user_id = os.environ["IG_USER_ID"]
-    return _post(
-        f"{ig_user_id}/messages",
-        {"recipient": {"id": igsid}, "message": {"text": text}},
+    resultado = _post(
+        f"{ig_user_id}/messages", {"recipient": {"id": igsid}, "message": {"text": text}}
     )
+    _registrar_envio(igsid=igsid, acao="ig_send_dm")
+    return resultado
 
 
-def send_private_reply(comment_id: str, text: str) -> dict:
+def send_private_reply(comment_id: str, text: str, igsid: str = "") -> dict:
     """Resposta privada a um comentário. UMA vez por comentário, até 7 dias.
 
-    ATENÇÃO: envie SEMPRE texto puro. Há relato de que anexos/botões são
-    recusados para quem não segue a conta — e a chamada que falha AINDA
-    consome a private reply. Ver docs/01 §3.3.
+    ATENÇÃO: envie SEMPRE texto puro. Anexos/botões são recusados para quem não
+    segue a conta — e a chamada que falha AINDA consome a private reply (docs/01 §3.3).
     """
-    _check_kill_switch()
-    _check_private_reply_available(comment_id)
-
     if not text or not text.strip():
         raise PolicyBlock("Mensagem vazia.")
+    # A private reply é permitida justamente fora da janela de 24h (até 7 dias),
+    # então NÃO exige janela — mas exige a cota e o kill switch.
+    _autorizar(igsid, comment_id=comment_id, exige_janela=False)
 
-    # Marca ANTES da chamada: uma falha de rede também queima a private reply,
-    # e um retry cego geraria erro em cima de erro.
-    _mark_private_reply_sent(comment_id)
+    # Marca ANTES da chamada: uma falha de rede também queima a private reply, e um
+    # retry cego geraria erro em cima de erro.
+    rules.mark_private_reply_sent(comment_id)
 
-    return _post(f"{comment_id}/replies", {"message": text})
+    resultado = _post(f"{comment_id}/replies", {"message": text})
+    _registrar_envio(igsid=igsid, comment_id=comment_id, acao="ig_private_reply")
+    return resultado
 
 
-def reply_comment_public(comment_id: str, text: str) -> dict:
-    """Resposta pública a um comentário. Visível para todo mundo."""
-    _check_kill_switch()
+def reply_comment_public(comment_id: str, text: str, igsid: str = "") -> dict:
+    """Resposta pública a um comentário. Visível para todo mundo.
+
+    Não exige janela (é público), mas exige kill switch e respeita opt-out — e aqui
+    a despedida NÃO é permitida: quem pediu para ser deixado em paz não é engajado
+    em público nem uma vez.
+    """
     if not text or not text.strip():
         raise PolicyBlock("Mensagem vazia.")
-    return _post(f"{comment_id}/replies", {"message": text})
+    _autorizar(igsid, exige_janela=False, permite_despedida=False)
+
+    resultado = _post(f"{comment_id}/replies", {"message": text})
+    _registrar_envio(igsid=igsid, comment_id=comment_id, acao="ig_reply_comment")
+    return resultado

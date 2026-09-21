@@ -1,5 +1,5 @@
 name: social-seller-edson
-version: 1.0.1
+version: 1.0.2
 description: >-
   Social Seller do time do Edson Burger — moderação, atendimento e vendas no
   Instagram, com camada de inteligência sobre os WhatsApps da Clint.
@@ -64,3 +64,7 @@ distribution_owned:
   - skills/
   - cron/
   - plugins/
+  # Roda como script de rota de webhook. Precisa viajar: sem ele a rota
+  # `instagram` aponta para um arquivo inexistente e TODO evento é descartado
+  # em silêncio (a resolução falha fechado).
+  - scripts/
