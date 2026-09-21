@@ -121,14 +121,33 @@ Se quiser o hook de shell como defesa extra, veja [`deploy/GUARDRAIL.md`](deploy
 O adapter de webhook do Hermes **só aceita POST**. A Meta faz um **GET** de verificação antes de
 aceitar a URL. Sem o proxy na frente, você não consegue nem cadastrar o webhook. Ver `deploy/`.
 
-### 3.9 🟠 O script de intake não existe neste build
-`config.yaml` monta a rota de webhook sem a chave `script:`. O script de intake determinístico
-(dedupe, opt-out, janela de 24h, sanitização, gravação do lead) **ainda não foi construído**.
-Enquanto isso, todo evento chega cru no agente e essas garantias dependem do julgamento do
-modelo — que é exatamente do que este projeto não quer depender.
+### 3.9 ✅ O intake determinístico existe e roda antes do agente
+`config.yaml` declara `script: instagram-intake.py` na rota. O script está em `scripts/` e
+**viaja** na distribution (está em `distribution_owned`).
 
-**Não declare `script:` apontando para um arquivo que não existe:** a rota passaria a falhar em
-silêncio.
+Ele resolve, sem gastar um token de LLM: dedupe (a Meta reentrega webhook), opt-out permanente,
+janela de 24h, os oito gatilhos A0, sanitização, "conteúdo não é comando" (§21) e a gravação da
+interação na base. O resultado é um payload com `diretiva` e `proibicoes` que o agente **obedece,
+não redecide**.
+
+**Ele falha FECHADO.** Se quebrar, o evento é descartado — não repassado cru ao modelo. Sem o
+motor de regras não se sabe se a pessoa está em crise. O payload original vai para
+`logs/instagram-intake-falhas.jsonl`, então nada se perde: dá para reprocessar.
+
+⚠️ **Por isso, monitore esse arquivo.** Um drain nele significa que eventos estão sendo
+descartados em silêncio do ponto de vista de quem opera:
+
+```bash
+tail -f <perfil>/logs/instagram-intake-falhas.jsonl
+```
+
+Se ele crescer, o webhook está recebendo algo que o intake não entende. É falha de configuração
+ou formato novo da Meta — as duas merecem conserto rápido.
+
+### 3.10 🟠 O `executed_action` ainda depende de o envio casar com a interação
+O gate grava `executed_action` depois do envio confirmado, casando por `comment_id`/`message_id`.
+Quando não casa, o envio sai normalmente e fica um WARNING no log — mas a trilha de auditoria
+fica com buraco. Vale acompanhar no modo copiloto. Ver PDF §13.
 
 ---
 

@@ -190,6 +190,7 @@ Suas credenciais, memórias e conversas **não são tocadas**. Só o agente em s
 | O agente responde como assistente genérico | A personalidade não carregou. Avise quem te entregou. |
 | Nada é enviado no Instagram | Provavelmente a janela de 24h (o Instagram só permite responder quem falou primeiro) ou o kill switch ligado. |
 | O follow-up não roda | Você esqueceu o passo 4. Rode `hermes -p social-seller-edson cron list`. |
+| Comentários ou DMs não geram resposta nenhuma | Veja se o arquivo `<Path>/logs/instagram-intake-falhas.jsonl` existe e está crescendo. Se estiver, o evento está chegando num formato que o agente não reconhece — avise quem te entregou. Sem esse arquivo, o problema é o webhook da Meta. |
 | Quer entender tudo que pode dar errado | Leia [`HANDOVER.md`](HANDOVER.md) — as armadilhas, uma por uma. |
 
 ---

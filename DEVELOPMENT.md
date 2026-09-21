@@ -24,7 +24,12 @@ social-seller-edson/
 │   ├── moderacao/               # matriz de moderação, protocolo A0, regras da Meta
 │   └── atribuicao/              # media_id como eixo, IGSID como chave
 ├── cron/jobs.json               # os 2 jobs, instalados pausados
-├── plugins/instagram-seller/    # tools ig_* + guardrail de kill switch
+├── plugins/instagram-seller/
+│   ├── rules.py                 # MOTOR DE REGRAS determinístico + estado (SQLite)
+│   ├── instagram_api.py         # gate de envio (última barreira antes da rede)
+│   └── __init__.py              # registro das 3 tools + 1 hook
+├── scripts/instagram-intake.py  # intake da rota: roda ANTES do LLM, falha fechado
+├── tests/                       # 71 testes — NÃO viaja (artefato de desenvolvimento)
 └── deploy/                      # infra do cliente: proxy de borda, TLS, hook de shell
 ```
 
@@ -39,7 +44,11 @@ social-seller-edson/
 | `config.yaml` | Modelo, toolsets, `plugins.enabled`, rota de webhook |
 | `skills/` | As três skills |
 | `cron/jobs.json` | Os dois jobs — **pausados** |
-| `plugins/instagram-seller/` | As tools de envio + o guardrail |
+| `plugins/instagram-seller/` | Motor de regras + as tools de envio + o guardrail |
+| `scripts/instagram-intake.py` | O intake da rota de webhook |
+
+**Não viaja:** `tests/`, `README.md`, `HANDOVER.md`, `deploy/`, `.gitignore` — artefatos de
+desenvolvimento e documentação. Só chega ao cliente o que está em `distribution_owned`.
 
 **NUNCA viaja** (exclusão dura, no instalador): `auth.json` · `.env` · `memories/` ·
 `sessions/` · `state.db*` · `logs/` · `workspace/` · `plans/` · `home/` · caches · `local/`.
@@ -72,25 +81,92 @@ hermes profile purge-identity sse-teste     # é um passo separado
 `plugins doctor` respondendo `registrations: 3 tool(s), 1 hook(s)` é o sinal mais barato de que
 o plugin **e** o hook in-process estão de pé.
 
-### Testar o guardrail sem gastar token
+## Motor de regras e testes
 
-O `_gate()` vive no caminho do envio, então dá para provar o bloqueio direto — sem chave de
-API e sem tocar na rede:
+Três camadas, independentes de propósito. A regra que importa está repetida em duas delas — mas
+com **uma implementação só**, em `rules.py`, para não divergirem com o tempo.
+
+| Camada | Quando roda | O que decide |
+|---|---|---|
+| `scripts/instagram-intake.py` | antes do LLM | dedupe, opt-out, A0, sanitização, janela |
+| `plugins/.../instagram_api.py` | depois do LLM, antes da rede | kill switch, opt-out, janela, cota, texto vazio |
+| prompt do agente | durante a resposta | tom, jogada, o que dizer |
+
+Nenhuma camada confia na anterior. Se a de cima estiver desligada, com bug ou contornada por
+prompt injection, a de baixo ainda barra. **Nunca mova uma regra para o prompt** — é o que o
+PDF §06 proíbe ("confiança não substitui uma regra").
+
+### Rodar os testes
 
 ```bash
-HERMES_HOME="<path>/profiles/sse-teste" python - <<'PY'
-import sys; sys.path.insert(0, "plugins/instagram-seller")
-import instagram_api as api
-api.KILL_SWITCH.write_text("blocked")
+python -m unittest discover -s tests        # 71 testes, ~7s, sem rede e sem chave de API
+```
+
+| Arquivo | Cobre |
+|---|---|
+| `tests/test_rules.py` | gatilhos A0, dois níveis, opt-out, janela, dedupe, pré-condições de follow-up, §21 |
+| `tests/test_intake.py` | o contrato real do webhook: subprocess, payload no stdin, `[SILENT]`, lotes, falhas |
+| `tests/test_gate.py` | kill switch, janela, cota de private reply, opt-out, `executed_action` |
+
+`test_intake.py` chama o script como o gateway chama — por subprocess, não por import. Testar por
+import não provaria a fronteira, que é exatamente onde quebra.
+
+### As duas políticas de erro são deliberadas e opostas
+
+**Para A0, falso positivo é barato.** Escalar sem necessidade custa minutos de atenção; deixar
+passar uma crise custa a marca. Por isso os padrões são de alta revocação.
+
+**Mas alerta que sempre toca deixa de ser alerta** — e fila de emergência com ruído é risco de
+segurança, não de eficiência. Daí os dois níveis em `A0Rule`:
+
+- `patterns` — **decisivos**: casar um já escala. `quero morrer`, `vou me matar`, `suicidio`.
+- `corroborativos` — **ambíguos sozinhos**: só escalam quando DOIS casam. `nao aguento mais` é
+  hipérbole do dia a dia ("não aguento mais esse calor") e sozinho não pode virar P0.
+
+E `severity` define o custo: **P0/P1** vão para a fila humana; **P2** (hostilidade) é rótulo —
+o agente responde com a instrução de não rebater, sem acordar ninguém.
+
+Ao adicionar um gatilho, decida conscientemente em qual dos dois níveis ele entra, e escreva o
+teste dos dois lados: que ele dispara no caso grave **e** que ele não dispara no fluxo normal.
+O teste `test_pergunta_de_preco_limpa_nao_dispara_nada` é o mais importante do repositório.
+
+### Testar o gate à mão, no profile instalado
+
+O gate vive no caminho do envio, então dá para provar o bloqueio sem chave de API e sem tocar na
+rede — e, importante, **carregando o plugin como o loader carrega**, porque é isso que prova que
+o import relativo de `rules` resolve:
+
+```python
+import importlib.util, os, sys
+from pathlib import Path
+
+home = Path(os.environ["PROFILE"])
+pdir = home / "plugins" / "instagram-seller"
+spec = importlib.util.spec_from_file_location(
+    "instagram_seller", pdir / "__init__.py", submodule_search_locations=[str(pdir)]
+)
+mod = importlib.util.module_from_spec(spec)
+mod.__package__, mod.__path__ = "instagram_seller", [str(pdir)]
+sys.modules["instagram_seller"] = mod
+spec.loader.exec_module(mod)
+
+rules = sys.modules["instagram_seller.rules"]
+api = sys.modules["instagram_seller.instagram_api"]
+api._post = lambda p, pl: {"id": "ok"}          # nenhuma rede
+
+rules.record_inbound("u1")
+api.send_dm("u1", "oi")                          # passa
+
+rules.kill_switch_path().write_text("")
 try:
-    api.send_dm("igsid_qualquer", "oi")
-    print("PROBLEMA: passou!")
+    api.send_dm("u1", "oi")
+    print("PROBLEMA: kill switch não bloqueou")
 except api.PolicyBlock as e:
     print("BLOQUEADO:", str(e)[:60])
-finally:
-    api.KILL_SWITCH.unlink(missing_ok=True)
-PY
 ```
+
+`rules.kill_switch_path()` resolve para o `HERMES_HOME` do profile. Usar `Path.home()` daria o
+lugar errado no Windows — foi um bug real do spike original.
 
 ### Testar a personalidade sem chave de API
 
@@ -118,6 +194,22 @@ estiver validado.
 **`distribution_owned` é allowlist, não decoração.** Declarado, só os caminhos listados são
 copiados — e `plugins/` **não** está entre os padrões do Hermes. Se você adicionar um diretório
 novo ao payload e esquecer de declará-lo, ele simplesmente não chega, em silêncio.
+
+**O script da rota precisa estar em `scripts/` e declarado.** O Hermes resolve `script:` só
+dentro de `<HERMES_HOME>/scripts/` (bloqueia path traversal) e **falha fechado**: script que não
+resolve vira evento descartado em silêncio. Um diretório novo no payload sem entrada em
+`distribution_owned` produz exatamente isso — o agente fica mudo e nada no `hermes` avisa.
+Depois de qualquer mexida em `scripts/` ou na rota, instale e **rode o intake de verdade**:
+
+```bash
+cd "<perfil>/scripts"
+echo '{"object":"instagram","entry":[{"id":"1","changes":[{"field":"comments",
+"value":{"from":{"id":"55"},"media":{"id":"m1"},"id":"c1","text":"quanto custa?"}}]}]}' \
+  | HERMES_HOME="<perfil>" python instagram-intake.py
+```
+
+Espera-se um JSON com `diretiva: responder`. Se vier `[SILENT]`, o intake não entendeu o payload
+— cheque `logs/instagram-intake-falhas.jsonl`.
 
 **`config.yaml` é sobrescrito no update** (está em `distribution_owned`, de propósito). Toda
 configuração específica do cliente vai no `.env`, que nunca é tocado. O preço disso: se o
@@ -148,10 +240,12 @@ Repositório **privado**. É código comercial + configuração de cliente.
 
 ## Verificação antes de cada release
 
+- [ ] `python -m unittest discover -s tests` → **71 testes, OK**
 - [ ] `hermes profile install ./social-seller-edson --name sse-teste -y` funciona
 - [ ] `plugins doctor` → `3 tool(s), 1 hook(s)`
 - [ ] `cron list` → os jobs presentes e pausados
+- [ ] `scripts/instagram-intake.py` chegou no profile e responde a um payload de teste
 - [ ] `hermes profile update sse-teste -y` preserva o `.env`
 - [ ] `SOUL.md` passa o escâner de injeção
 - [ ] `git ls-files` não tem nada de `.env`, `auth.json`, `memories/`, `sessions/`
-- [ ] Nenhum CRLF nos `.py` de `deploy/` e `plugins/`
+- [ ] Nenhum CRLF nos `.py` de `deploy/`, `plugins/` e `scripts/`
