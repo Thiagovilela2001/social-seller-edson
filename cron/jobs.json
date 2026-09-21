@@ -1,0 +1,94 @@
+{
+  "jobs": [
+    {
+      "id": "sse-followup-janela",
+      "name": "followup-janela",
+      "prompt": "Rode a rotina de follow-up da janela de 24h.\n\n1. Liste, no Postgres do cliente, os leads em que TODAS estas condições valem:\n   - estagio em ('interessado', 'lead_quente')\n   - a última mensagem da pessoa foi do lead (não da conta)\n   - a janela de 24h expira nas próximas 4 horas\n   - opt_out = false\n   - nao_perturbar = false\n   - toques_enviados < 2\n2. Para cada um, decida UM toque curto de reativação seguindo a skill social-seller-edson\n   (jogada 'reagendar'). Máximo 2 mensagens, máximo 3 linhas cada.\n3. Envie por ig_send_dm. Se a janela já tiver expirado, NÃO tente — registre como\n   'janela_perdida' e marque para captura de WhatsApp no próximo contato.\n4. Atualize toques_enviados, ultimo_toque_em e o resumo do lead.\n5. Ao final, mande no Telegram do time: quantos leads entraram na fila, quantos enviaram,\n   quantos falharam e o motivo.\n\nNão crie oferta, preço ou link. Não invente urgência. Se um lead for A0 (reclamação, crise,\njurídico, desconto, menor), NÃO envie nada — escale para humano.",
+      "skills": [
+        "social-seller-edson"
+      ],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": null,
+      "no_agent": false,
+      "monitor_script": null,
+      "monitor_url": null,
+      "monitor_state": null,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "display": "0 9 * * *"
+      },
+      "schedule_display": "0 9 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 0
+      },
+      "enabled": false,
+      "state": "paused",
+      "paused_at": null,
+      "paused_reason": "Instalado pausado de propósito. Habilite com: hermes -p social-seller-edson cron resume sse-followup-janela",
+      "created_at": null,
+      "next_run_at": null,
+      "last_run_at": null,
+      "last_status": null,
+      "last_error": null,
+      "last_delivery_error": null,
+      "last_delivery_unverified": null,
+      "failure_streak": 0,
+      "deliver": "telegram",
+      "origin": null,
+      "enabled_toolsets": null,
+      "workdir": null
+    },
+    {
+      "id": "sse-mineracao-semanal",
+      "name": "mineracao-semanal",
+      "prompt": "Rode a mineração semanal de conhecimento.\n\n1. Via MCP da Clint (somente leitura), leia as conversas de WhatsApp da última semana.\n2. Extraia, com citação de origem:\n   - objeções recorrentes que ainda não estão na base de conhecimento\n   - perguntas que a base não responde (lacunas)\n   - vocabulário e bordões reais do Edson que o tom do agente ainda não captura\n   - produtos, preços ou garantias citados que divergem da base atual\n3. Grave as descobertas como propostas em arquivo de revisão — NÃO altere a base de\n   conhecimento nem a persona por conta própria. Mudança de persona passa por humano.\n4. Mande no Telegram do time um resumo com no máximo 10 itens, cada um com a origem.\n\nNunca copie dado sensível (saúde, financeiro pessoal, jurídico) para a base nem para o\nrelatório. Se aparecer, registre apenas que apareceu e em qual conversa.",
+      "skills": [
+        "social-seller-edson",
+        "atribuicao"
+      ],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": null,
+      "no_agent": false,
+      "monitor_script": null,
+      "monitor_url": null,
+      "monitor_state": null,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 8 * * 1",
+        "display": "every monday 8am"
+      },
+      "schedule_display": "every monday 8am",
+      "repeat": {
+        "times": null,
+        "completed": 0
+      },
+      "enabled": false,
+      "state": "paused",
+      "paused_at": null,
+      "paused_reason": "Instalado pausado de propósito. Só habilite depois de CLINT_MCP_URL estar no .env e validado.",
+      "created_at": null,
+      "next_run_at": null,
+      "last_run_at": null,
+      "last_status": null,
+      "last_error": null,
+      "last_delivery_error": null,
+      "last_delivery_unverified": null,
+      "failure_streak": 0,
+      "deliver": "telegram",
+      "origin": null,
+      "enabled_toolsets": null,
+      "workdir": null
+    }
+  ],
+  "updated_at": null
+}

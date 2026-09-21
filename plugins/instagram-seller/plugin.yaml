@@ -1,0 +1,29 @@
+name: instagram-seller
+version: 0.1.0
+description: >-
+  Ferramentas de envio no Instagram (DM, resposta privada a comentário,
+  resposta pública) com as regras da Meta impostas em CÓDIGO — janela de 24h,
+  private reply única por comentário, e kill switch.
+
+provides_tools:
+  - ig_send_dm
+  - ig_private_reply
+  - ig_reply_comment
+
+provides_hooks:
+  - pre_tool_call
+
+# Gate de carregamento: sem token, o plugin nem liga.
+requires_env:
+  - name: IG_ACCESS_TOKEN
+    description: "Token de longa duração da conta profissional do Instagram"
+    secret: true
+  - name: IG_USER_ID
+    description: "ID da conta profissional do Instagram (ig-user-id)"
+  - name: META_APP_SECRET
+    description: "App Secret do app Meta do cliente — usado para validar assinatura"
+    secret: true
+
+# Nenhuma capability privilegiada: não sobrescrevemos tool nativa.
+# (Se um dia precisar, declare aqui E conceda INTERATIVAMENTE — em sessão
+#  não-TTY as capabilities NÃO são concedidas.)

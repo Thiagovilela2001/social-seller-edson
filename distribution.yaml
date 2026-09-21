@@ -1,0 +1,66 @@
+name: social-seller-edson
+version: 1.0.0
+description: >-
+  Social Seller do time do Edson Burger — moderação, atendimento e vendas no
+  Instagram, com camada de inteligência sobre os WhatsApps da Clint.
+hermes_requires: ">=0.21.0"
+author: "Gian — [SUA EMPRESA]"
+license: "Commercial"
+
+# O que o instalador precisa ter em mãos antes de rodar.
+# O install marca cada uma como "set" ou "needs setting".
+env_requires:
+  # --- Meta (App criado e verificado NO NOME DO CLIENTE) ---
+  - name: IG_ACCESS_TOKEN
+    description: "Token de longa duração da conta profissional do Instagram"
+    required: true
+  - name: IG_USER_ID
+    description: "ID da conta profissional do Instagram (ig-user-id)"
+    required: true
+  - name: META_APP_SECRET
+    description: "App Secret do app Meta — valida a assinatura do webhook"
+    required: true
+  - name: META_VERIFY_TOKEN
+    description: "String que VOCÊ inventa; usada no handshake de verificação"
+    required: true
+
+  # --- Webhook adapter do Hermes ---
+  - name: WEBHOOK_SECRET
+    description: "Secret global do adapter de webhook do Hermes"
+    required: true
+  - name: WEBHOOK_ENABLED
+    description: "Liga o adapter de webhook"
+    required: false
+    default: "true"
+  - name: WEBHOOK_PORT
+    description: "Porta local do adapter de webhook"
+    required: false
+    default: "8644"
+
+  # --- Operação ---
+  - name: TELEGRAM_BOT_TOKEN
+    description: "Bot do Telegram para a fila de atendimento humano e escaladas A0"
+    required: true
+  - name: DATABASE_URL
+    description: "Postgres do cliente — leads, estágios, mensagens, pedidos"
+    required: true
+
+  # --- Inferência (na conta do cliente) ---
+  - name: OPENROUTER_API_KEY
+    description: "Chave de inferência. Recomendado configurar teto de gasto."
+    required: true
+
+  # --- Inteligência (opcional: sem isso, a mineração semanal não roda) ---
+  - name: CLINT_MCP_URL
+    description: "Endpoint MCP da Clint. Somente leitura."
+    required: false
+    default: ""
+
+# config.yaml precisa ser sobrescrito no update, senão plugin e hook novos não
+# chegam ao cliente. Valor específico do cliente vai no .env, que nunca é tocado.
+distribution_owned:
+  - SOUL.md
+  - config.yaml
+  - skills/
+  - cron/
+  - plugins/

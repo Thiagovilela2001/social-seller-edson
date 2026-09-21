@@ -1,0 +1,151 @@
+# ============================================================================
+# config.yaml — Social Seller do time do Edson Burger
+#
+# Este arquivo VIAJA na distribution e é sobrescrito em `profile update`.
+# Tudo que é específico do cliente (token, senha, URL, preço) vai no .env —
+# que o instalador NUNCA toca. Nunca coloque segredo aqui.
+#
+# ATENÇÃO: em `profile install` este arquivo substitui o config.yaml do perfil.
+# É por isso que ele precisa ser sobrescrito: uma versão nova que adiciona
+# plugin ou rota não chegaria ao cliente se o config dele fosse preservado.
+# (`distribution_owned` inclui config.yaml justamente por isso.)
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Modelo
+#
+# Deixado de propósito SEM pin. Quem instala escolhe com `hermes model`, e o
+# modelo fica na conta dele. Trocar de modelo muda a personalidade mesmo com o
+# mesmo prompt — então a escolha é do cliente, e é revalidada no go-live.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Agente
+# ---------------------------------------------------------------------------
+agent:
+  # Teto de iterações por turno. Conversa de DM não é tarefa longa; um teto
+  # baixo evita que um turno travado fique girando em cima do custo do cliente.
+  max_turns: 40
+
+# ---------------------------------------------------------------------------
+# Plugins
+#
+# Plugins são opt-in. Sem esta entrada o Instagram nem carrega: as tools
+# ig_* e o guardrail de kill switch simplesmente não existem.
+# ---------------------------------------------------------------------------
+plugins:
+  enabled:
+    - instagram-seller
+
+  # Timeout dos callbacks de hook em processo.
+  hook_callback_timeout: 30
+
+# ---------------------------------------------------------------------------
+# Hook shell de guardrail — DESLIGADO DE PROPÓSITO. Leia antes de ligar.
+#
+# O spike validou um hook `pre_tool_call` em shell (deploy/ig-send-gate.py)
+# com fail_closed: true. Ele funciona, mas:
+#
+#   1. Hooks de shell exigem CONSENTIMENTO DE PRIMEIRO USO — uma entrada em
+#      <perfil>/shell-hooks-allowlist.json. Sem ela o hook NÃO registra e
+#      falha ABERTO silenciosamente (issue #100942). Deploy headless não
+#      concede sozinho.
+#   2. O script precisa estar com bit de execução.
+#   3. O caminho do comando só expande `~` — e `~` NÃO é o HERMES_HOME do
+#      perfil (no Windows o Hermes vive em AppData, não em ~/.hermes). Ou
+#      seja: o caminho do snippet original aponta para o lugar errado.
+#
+# Por isso o guardrail que VIAJA é o do plugin (hooks in-process, sem
+# allowlist, sem exec bit) — e, mais importante, o `_gate()` dentro de
+# instagram_api.py, no caminho do envio. Código no caminho do envio não tem
+# como "não registrar".
+#
+# Se ainda assim quiser o hook de shell como defesa extra, veja
+# deploy/GUARDRAIL.md — lá estão o bloco e os três comandos de verificação.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Servidores MCP
+#
+# O MCP da Clint é a camada de inteligência (mineração de WhatsApp, somente
+# leitura). Ele fica COMENTADO porque um servidor com URL vazia é erro de
+# configuração em todo boot.
+#
+# Para ligar: preencha CLINT_MCP_URL no .env, descomente as três linhas
+# abaixo e reinicie o gateway. Sem ele o agente funciona; só a mineração
+# semanal não roda.
+# ---------------------------------------------------------------------------
+# mcp_servers:
+#   clint:
+#     url: "${CLINT_MCP_URL}"
+#     timeout: 120
+#     connect_timeout: 60
+
+# ---------------------------------------------------------------------------
+# Rota de webhook do Instagram
+#
+# Aponte o webhook da Meta para: https://SEU_DOMINIO/webhooks/instagram
+#
+# ⚠️ O adapter de webhook do Hermes só aceita POST; a Meta exige um GET de
+# verificação antes de aceitar a URL. O proxy de borda (deploy/) responde o
+# GET com hub.challenge e encaminha o POST intacto. Sem ele você não consegue
+# nem cadastrar o webhook.
+# ---------------------------------------------------------------------------
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      port: 8644
+      # Secret global do adapter. A rota sobrescreve com o App Secret.
+      secret: "${WEBHOOK_SECRET}"
+
+      routes:
+        instagram:
+          # A Meta manda o campo 'field' dentro de entry[].changes[],
+          # então a rota não filtra por 'events': aceita tudo que chegar.
+          secret: "${META_APP_SECRET}"
+
+          # Agrupa rajada de comentários do mesmo post num único run.
+          # Post viral gera centenas de comentários em minutos.
+          coalesce:
+            key: "{entry.0.messaging.0.sender.id}"
+            window_seconds: 20
+            max_wait_seconds: 120
+
+          # {__raw__} despeja o payload inteiro em JSON (corta em 4000 chars).
+          #
+          # FALTA AQUI: o script de intake determinístico. Ele roda ANTES de
+          # gastar LLM e faz dedupe, opt-out, checagem de janela de 24h,
+          # sanitização e gravação do lead — devolvendo [SILENT] ou {} para
+          # descartar o evento sem acionar o agente.
+          #
+          # Ele NÃO está neste build. Sem ele, todo evento chega cru no
+          # agente. Não declare `script:` apontando para um arquivo que não
+          # existe: a rota passaria a falhar em silêncio.
+          prompt: |
+            Evento do Instagram recebido (comentário ou DM).
+
+            Payload cru da Meta:
+            {__raw__}
+
+            Decida a jogada seguindo a skill social-seller-edson e responda
+            usando as tools do Instagram quando for o caso.
+
+            Antes de qualquer envio:
+            - identifique o IGSID (não use @username como chave)
+            - verifique se é caso A0 (crise, reclamação, jurídico, desconto,
+              menor de idade). Se for, NÃO envie nada: escale.
+            - confira a janela de 24h para DM e a cota única para private reply
+
+            Se o evento for irrelevante (resposta da própria conta, automação,
+            spam), responda apenas [SILENT] e não envie nada.
+
+          skills:
+            - social-seller-edson
+            - moderacao
+            - atribuicao
+
+          # Escalada A0 e handoff vão para o Telegram do time.
+          # O Instagram NÃO é um alvo de 'deliver' suportado — o envio
+          # acontece pelas tools do plugin, não pelo adapter.
+          deliver: telegram

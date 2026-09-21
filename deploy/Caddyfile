@@ -1,0 +1,77 @@
+# Caddyfile — proxy de borda para o webhook da Meta
+#
+# POR QUÊ ISSO EXISTE:
+# O webhook adapter do Hermes aceita apenas POST.
+# A Meta exige um GET de verificação (hub.mode / hub.verify_token / hub.challenge)
+# antes de aceitar a URL do webhook. Sem responder esse GET, não há cadastro.
+#
+# Este proxy:
+#   GET  /webhooks/instagram  -> responde o hub.challenge (handshake da Meta)
+#   POST /webhooks/instagram  -> encaminha para o Hermes :8644, preservando o corpo CRU
+#
+# IMPORTANTE: o corpo precisa chegar byte a byte igual ao que a Meta enviou,
+# senão a assinatura X-Hub-Signature-256 não valida.
+
+{
+	# Em produção use o e-mail real do cliente
+	email ops@example.com
+}
+
+# Troque pelo domínio real. Em produção o Caddy emite TLS automaticamente.
+instagram.example.com {
+	encode gzip
+
+	# ---- Handshake da Meta (GET) ----
+	@meta_verify {
+		method GET
+		path /webhooks/instagram
+		query hub.mode=subscribe
+	}
+
+	handle @meta_verify {
+		# Compara o verify_token com o esperado.
+		# TROQUE por um valor forte. Ele NÃO é o App Secret.
+		@token_ok query hub.verify_token=SEU_VERIFY_TOKEN_AQUI
+
+		handle @token_ok {
+			# Ecoa o hub.challenge em texto puro, HTTP 200. É só isso que a Meta quer.
+			respond "{query.hub.challenge}" 200 {
+				close
+			}
+		}
+
+		# Token errado -> 403. A Meta mostra "falha na verificação".
+		respond "forbidden" 403
+	}
+
+	# ---- Eventos da Meta (POST) ----
+	@meta_events {
+		method POST
+		path /webhooks/instagram
+	}
+
+	handle @meta_events {
+		# NUNCA use handle_path aqui: ele reescreve a URI e o Hermes perde a rota.
+		reverse_proxy 127.0.0.1:8644 {
+			# Preserva o corpo cru para a validação HMAC do Hermes.
+			header_up Host {upstream_hostport}
+
+			# A Meta reentrega se não receber 200 rápido.
+			# O Hermes responde rápido, mas não deixe o proxy segurar.
+			transport http {
+				read_timeout 10s
+				write_timeout 10s
+			}
+		}
+	}
+
+	# Qualquer outra coisa: 404 (não exponha o resto do Hermes)
+	handle {
+		respond "not found" 404
+	}
+
+	log {
+		output file /var/log/caddy/instagram-webhook.log
+		format json
+	}
+}
