@@ -1,5 +1,5 @@
 name: social-seller-edson
-version: 1.0.2
+version: 1.3.0
 description: >-
   Social Seller do time do Edson Burger — moderação, atendimento e vendas no
   Instagram, com camada de inteligência sobre os WhatsApps da Clint.
@@ -50,6 +50,27 @@ env_requires:
     description: "Chave de inferência. Recomendado configurar teto de gasto."
     required: true
 
+  # --- Regras de negócio (REGRAS-DE-NEGOCIO.md) ---
+  #
+  # As duas abaixo têm default seguro: sem elas o agente funciona, só que com a
+  # regra na posição mais conservadora. Ligar cada uma é decisão do EDSON, não
+  # do código — ver a seção "Pendências" do REGRAS-DE-NEGOCIO.md.
+  - name: IG_POLITICA_CONSUMIDOR
+    description: >-
+      Política de garantia/devolução/frete aprovada pelo cliente, em uma linha.
+      Sem isto (RN-011), o agente NÃO afirma garantia, prazo de devolução nem
+      frete grátis — fail-closed de propósito.
+      Ex.: "Garantia de 30 dias. 30 dias para devolver. Frete grátis acima de R$ 200."
+    required: false
+    default: ""
+  - name: IG_DIVULGAR_AUTOMACAO
+    description: >-
+      "true" faz o agente se anunciar como assistente automatizado (RN-008).
+      DESLIGADO por padrão: a persona atual não se anuncia, e ligar isso muda a
+      voz do agente na cara do cliente. Decisão pendente do Edson.
+    required: false
+    default: "false"
+
   # --- Inteligência (opcional: sem isso, a mineração semanal não roda) ---
   - name: CLINT_MCP_URL
     description: "Endpoint MCP da Clint. Somente leitura."
@@ -64,6 +85,11 @@ distribution_owned:
   - skills/
   - cron/
   - plugins/
+  # As regras de negócio que o motor impõe. Viajam com a distribuição porque
+  # precisam acompanhar RULES_VERSION: documento que descreve regra que o código
+  # já mudou é pior que documento nenhum. Anotação do cliente vai à parte — este
+  # arquivo é sobrescrito no update.
+  - REGRAS-DE-NEGOCIO.md
   # Roda como script de rota de webhook. Precisa viajar: sem ele a rota
   # `instagram` aponta para um arquivo inexistente e TODO evento é descartado
   # em silêncio (a resolução falha fechado).

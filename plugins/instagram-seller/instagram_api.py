@@ -65,7 +65,8 @@ def _check_kill_switch() -> None:
     alvo = rules.kill_switch_path()
     if alvo.exists():
         raise PolicyBlock(
-            f"Kill switch ativo. Envio bloqueado. Desligue removendo {alvo}."
+            f"[{rules.RN_PARADA_EMERGENCIA}] Kill switch ativo. Envio bloqueado. "
+            f"Desligue removendo {alvo}."
         )
 
 
@@ -85,8 +86,8 @@ def _check_opt_out(igsid: str, *, permite_despedida: bool = True) -> None:
     if permite_despedida and rules.pode_enviar_despedida(igsid):
         return
     raise PolicyBlock(
-        "Opt-out registrado. Nenhum envio — nem despedida, que já foi enviada. "
-        "Este contato está encerrado de forma permanente."
+        f"[{rules.RN_OPT_OUT}] Opt-out registrado. Nenhum envio — nem despedida, "
+        "que já foi enviada. Este contato está encerrado de forma permanente."
     )
 
 
@@ -114,13 +115,22 @@ def _autorizar(
     igsid: str = "",
     *,
     comment_id: str = "",
+    texto: str = "",
     exige_janela: bool = True,
     permite_despedida: bool = True,
+    canal: str = "instagram",
+    proativo: bool = False,
+    acao: str = "",
 ) -> None:
     """Todas as regras que antecedem um envio, em ordem estável.
 
     A ordem é fixa porque o MOTIVO do bloqueio é a informação mais útil para quem
     está operando: kill switch e opt-out são mais graves que janela expirada.
+
+    A partir de rules 2.0.0, as regras de negócio (REGRAS-DE-NEGOCIO.md) entram
+    por `rules.avaliar_envio()` — uma única implementação para todo o sistema.
+    Cada bloqueio carrega o identificador `RN-nnn` da regra que o produziu, para
+    que o log de auditoria responda "qual regra aprovada impediu isto".
     """
     _check_kill_switch()
     if igsid:
@@ -129,6 +139,18 @@ def _autorizar(
         _check_private_reply_available(comment_id)
     if igsid and exige_janela:
         _check_window(igsid)
+
+    bloqueios = rules.avaliar_envio(
+        texto=texto,
+        igsid=igsid,
+        canal=canal,
+        proativo=proativo,
+        acao=acao,
+    )
+    if bloqueios:
+        # Reporta TODOS os bloqueios: um envio que viola duas regras precisa
+        # aparecer como dois problemas, não como o primeiro deles.
+        raise PolicyBlock(" | ".join(str(b) for b in bloqueios))
 
 
 def _registrar_envio(
@@ -175,21 +197,32 @@ def _post(path: str, payload: dict) -> dict:
         raise RuntimeError(f"Graph API {e.code} em /{path}: {detail}") from None
 
 
-def send_dm(igsid: str, text: str) -> dict:
-    """DM dentro da janela de 24h."""
+def send_dm(igsid: str, text: str, *, proativo: bool = False, acao: str = "") -> dict:
+    """DM dentro da janela de 24h.
+
+    `proativo=True` marca a ABORDAGEM (follow-up, reativação, aviso) — é o que
+    liga as RN-006/RN-007: horário humano e teto de toques. Responder quem
+    acabou de escrever é `proativo=False` e não tem restrição de horário.
+
+    `acao` é a ação declarada pelo agente (vocabulário de `NIVEL_AUTONOMIA`).
+    Ação A0 sem humano é bloqueada; A1 sem aprovação registrada também.
+    """
     if not text or not text.strip():
         raise PolicyBlock("Mensagem vazia.")
-    _autorizar(igsid, exige_janela=True)
+    _autorizar(igsid, exige_janela=True, texto=text, proativo=proativo, acao=acao)
 
     ig_user_id = os.environ["IG_USER_ID"]
     resultado = _post(
         f"{ig_user_id}/messages", {"recipient": {"id": igsid}, "message": {"text": text}}
     )
+    if proativo:
+        # Só DEPOIS do envio confirmado: tentativa bloqueada não consome cota.
+        rules.registrar_toque_proativo(igsid, tipo="followup", canal="instagram")
     _registrar_envio(igsid=igsid, acao="ig_send_dm")
     return resultado
 
 
-def send_private_reply(comment_id: str, text: str, igsid: str = "") -> dict:
+def send_private_reply(comment_id: str, text: str, igsid: str = "", *, acao: str = "") -> dict:
     """Resposta privada a um comentário. UMA vez por comentário, até 7 dias.
 
     ATENÇÃO: envie SEMPRE texto puro. Anexos/botões são recusados para quem não
@@ -199,7 +232,7 @@ def send_private_reply(comment_id: str, text: str, igsid: str = "") -> dict:
         raise PolicyBlock("Mensagem vazia.")
     # A private reply é permitida justamente fora da janela de 24h (até 7 dias),
     # então NÃO exige janela — mas exige a cota e o kill switch.
-    _autorizar(igsid, comment_id=comment_id, exige_janela=False)
+    _autorizar(igsid, comment_id=comment_id, exige_janela=False, texto=text, acao=acao)
 
     # Marca ANTES da chamada: uma falha de rede também queima a private reply, e um
     # retry cego geraria erro em cima de erro.
@@ -210,16 +243,21 @@ def send_private_reply(comment_id: str, text: str, igsid: str = "") -> dict:
     return resultado
 
 
-def reply_comment_public(comment_id: str, text: str, igsid: str = "") -> dict:
+def reply_comment_public(comment_id: str, text: str, igsid: str = "", *, acao: str = "") -> dict:
     """Resposta pública a um comentário. Visível para todo mundo.
 
     Não exige janela (é público), mas exige kill switch e respeita opt-out — e aqui
     a despedida NÃO é permitida: quem pediu para ser deixado em paz não é engajado
     em público nem uma vez.
+
+    `texto` passa pelo guardrail de saída (RN-010/RN-011): comentário público é
+    onde uma promessa de resultado faz mais estrago.
     """
     if not text or not text.strip():
         raise PolicyBlock("Mensagem vazia.")
-    _autorizar(igsid, exige_janela=False, permite_despedida=False)
+    _autorizar(
+        igsid, exige_janela=False, permite_despedida=False, texto=text, acao=acao
+    )
 
     resultado = _post(f"{comment_id}/replies", {"message": text})
     _registrar_envio(igsid=igsid, comment_id=comment_id, acao="ig_reply_comment")

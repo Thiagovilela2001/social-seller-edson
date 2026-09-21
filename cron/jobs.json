@@ -88,6 +88,50 @@
       "origin": null,
       "enabled_toolsets": null,
       "workdir": null
+    },
+    {
+      "id": "sse-vigia-fila-humana",
+      "name": "vigia-fila-humana",
+      "prompt": "Rode o vigia da fila humana (RN-012 — espera máxima do humano).\n\n1. Execute: `python scripts/fila-humana-sla.py`\n   Ele lê o mesmo banco de estado do agente e devolve, em texto e em JSON:\n   os casos abertos, os assumidos, e os que PASSARAM DO PRAZO, já ordenados por\n   gravidade (P0 antes de P1, mesmo se o P1 estiver mais atrasado).\n2. Se `atrasados` estiver VAZIO: NÃO envie mensagem nenhuma. Fila em dia não é notícia,\n   e alerta que sempre dispara deixa de ser alerta.\n3. Se houver atrasados, mande no Telegram do time, em no máximo 6 linhas:\n   - quantos casos passaram do prazo\n   - para cada um: #id, prioridade, motivo, quanto passou do prazo\n   - quais já foram cobrados antes (campo `alertas_anteriores`): caso reincidente é\n     caso sem dono, e é isso que precisa ficar visível\n4. Se algum caso P0 (crise emocional, menor, jurídico, dados de terceiro) estiver\n   atrasado, comece a mensagem por ele e diga explicitamente que é P0.\n5. NUNCA marque um caso como resolvido, assumido ou altere o estado do agente por\n   conta própria. Seu papel aqui é COBRAR humano, não substituir humano.\n6. Se o script sair com erro, diga isso — nunca afirme que a fila está em dia sem ter\n   lido o banco.",
+      "skills": [
+        "social-seller-edson"
+      ],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": null,
+      "no_agent": false,
+      "monitor_script": null,
+      "monitor_url": null,
+      "monitor_state": null,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/15 * * * *",
+        "display": "*/15 * * * *"
+      },
+      "schedule_display": "*/15 * * * *",
+      "repeat": {
+        "times": null,
+        "completed": 0
+      },
+      "enabled": false,
+      "state": "paused",
+      "paused_at": null,
+      "paused_reason": "Instalado pausado de propósito. Habilite com: hermes -p social-seller-edson cron resume sse-vigia-fila-humana. Confirme antes quem é o plantão que recebe o alerta — SLA sem gente do outro lado é número decorativo.",
+      "created_at": null,
+      "next_run_at": null,
+      "last_run_at": null,
+      "last_status": null,
+      "last_error": null,
+      "last_delivery_error": null,
+      "last_delivery_unverified": null,
+      "failure_streak": 0,
+      "deliver": "telegram",
+      "origin": null,
+      "enabled_toolsets": null,
+      "workdir": null
     }
   ],
   "updated_at": null

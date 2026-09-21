@@ -23,13 +23,17 @@ social-seller-edson/
 │   ├── social-seller-edson/     # funil, jogadas, few-shots, cadência de follow-up
 │   ├── moderacao/               # matriz de moderação, protocolo A0, regras da Meta
 │   └── atribuicao/              # media_id como eixo, IGSID como chave
-├── cron/jobs.json               # os 2 jobs, instalados pausados
+├── cron/jobs.json               # os 3 jobs, instalados pausados
+├── REGRAS-DE-NEGOCIO.md         # RN-001..RN-013 — as regras que o motor impõe (viaja)
 ├── plugins/instagram-seller/
 │   ├── rules.py                 # MOTOR DE REGRAS determinístico + estado (SQLite)
 │   ├── instagram_api.py         # gate de envio (última barreira antes da rede)
+│   ├── integracoes.py           # Bling/Clint/WhatsApp — FAIL-CLOSED (RN-019)
 │   └── __init__.py              # registro das 3 tools + 1 hook
-├── scripts/instagram-intake.py  # intake da rota: roda ANTES do LLM, falha fechado
-├── tests/                       # 71 testes — NÃO viaja (artefato de desenvolvimento)
+├── scripts/
+│   ├── instagram-intake.py      # intake da rota: roda ANTES do LLM, falha fechado
+│   └── fila-humana-sla.py       # vigia da fila humana (RN-012): quem passou do prazo
+├── tests/                       # 189 testes — NÃO viaja (artefato de desenvolvimento)
 └── deploy/                      # infra do cliente: proxy de borda, TLS, hook de shell
 ```
 
@@ -43,9 +47,11 @@ social-seller-edson/
 | `SOUL.md` | Personalidade |
 | `config.yaml` | Modelo, toolsets, `plugins.enabled`, rota de webhook |
 | `skills/` | As três skills |
-| `cron/jobs.json` | Os dois jobs — **pausados** |
+| `cron/jobs.json` | Os três jobs — **pausados** |
+| `REGRAS-DE-NEGOCIO.md` | As regras de negócio que o motor impõe (acompanha `RULES_VERSION`) |
 | `plugins/instagram-seller/` | Motor de regras + as tools de envio + o guardrail |
 | `scripts/instagram-intake.py` | O intake da rota de webhook |
+| `scripts/fila-humana-sla.py` | O vigia de SLA da fila humana (RN-012) |
 
 **Não viaja:** `tests/`, `README.md`, `HANDOVER.md`, `deploy/`, `.gitignore` — artefatos de
 desenvolvimento e documentação. Só chega ao cliente o que está em `distribution_owned`.
@@ -99,7 +105,7 @@ PDF §06 proíbe ("confiança não substitui uma regra").
 ### Rodar os testes
 
 ```bash
-python -m unittest discover -s tests        # 71 testes, ~7s, sem rede e sem chave de API
+python -m unittest discover -s tests        # 189 testes, ~21s, sem rede e sem chave de API
 ```
 
 | Arquivo | Cobre |
@@ -107,6 +113,12 @@ python -m unittest discover -s tests        # 71 testes, ~7s, sem rede e sem cha
 | `tests/test_rules.py` | gatilhos A0, dois níveis, opt-out, janela, dedupe, pré-condições de follow-up, §21 |
 | `tests/test_intake.py` | o contrato real do webhook: subprocess, payload no stdin, `[SILENT]`, lotes, falhas |
 | `tests/test_gate.py` | kill switch, janela, cota de private reply, opt-out, `executed_action` |
+| `tests/test_regras_de_negocio.py` | RN-001..RN-013 no caminho do envio + o **carimbo** de cada bloqueio |
+| `tests/test_lgpd.py` | RN-014..RN-018: retenção, expurgo, direito do titular, relatório mascarado |
+
+O teste do carimbo (`TestCarimboDasRegras`) não testa uma regra: protege o contrato do
+`REGRAS-DE-NEGOCIO.md`. Se um bloqueio novo sair sem `[RN-nnn]`, o documento passa a mentir sobre o
+comportamento do agente — e é ele que o cliente assina.
 
 `test_intake.py` chama o script como o gateway chama — por subprocess, não por import. Testar por
 import não provaria a fronteira, que é exatamente onde quebra.
@@ -240,7 +252,7 @@ Repositório **privado**. É código comercial + configuração de cliente.
 
 ## Verificação antes de cada release
 
-- [ ] `python -m unittest discover -s tests` → **71 testes, OK**
+- [ ] `python -m unittest discover -s tests` → **189 testes, OK**
 - [ ] `hermes profile install ./social-seller-edson --name sse-teste -y` funciona
 - [ ] `plugins doctor` → `3 tool(s), 1 hook(s)`
 - [ ] `cron list` → os jobs presentes e pausados

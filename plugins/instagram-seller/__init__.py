@@ -69,7 +69,16 @@ def register(ctx):
                 "Mensagem longa demais para DM. Quebre em até 2 mensagens de 3 linhas.",
             )
         try:
-            result = send_dm(params["igsid"], text)
+            result = send_dm(
+                params["igsid"],
+                text,
+                # `proativo` liga as RN-006/RN-007 (horário humano + teto de
+                # toques). Sem isso, uma abordagem de follow-up não teria hora
+                # nem cota — e ninguém perceberia até o primeiro unfollow.
+                proativo=bool(params.get("proativo")),
+                # `acao` é o vocabulário de NIVEL_AUTONOMIA (RN-009).
+                acao=(params.get("acao") or "").strip(),
+            )
         except PolicyBlock as e:
             return _err(BLOCKED_BY_POLICY, str(e))
         except KeyError as e:
@@ -93,7 +102,9 @@ def register(ctx):
             )
 
         try:
-            result = send_private_reply(params["comment_id"], text)
+            result = send_private_reply(
+                params["comment_id"], text, acao=(params.get("acao") or "").strip()
+            )
         except PolicyBlock as e:
             return _err(BLOCKED_BY_POLICY, str(e))
         except KeyError as e:
@@ -111,7 +122,11 @@ def register(ctx):
     def handle_reply_comment(params, **kwargs):
         del kwargs
         try:
-            result = reply_comment_public(params["comment_id"], (params.get("text") or "").strip())
+            result = reply_comment_public(
+                params["comment_id"],
+                (params.get("text") or "").strip(),
+                acao=(params.get("acao") or "").strip(),
+            )
         except PolicyBlock as e:
             return _err(BLOCKED_BY_POLICY, str(e))
         except KeyError as e:

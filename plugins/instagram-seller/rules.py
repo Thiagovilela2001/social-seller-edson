@@ -35,7 +35,15 @@ from typing import Any, Iterable, Optional
 
 # Versão das regras. Vai carimbada em TODA decisão (PDF §13: "explicar com qual
 # informação, regra e versão a resposta foi produzida"). Suba ao mudar qualquer tabela.
-RULES_VERSION = "1.0.0"
+#
+# 1.x -> 2.0.0: entrou a seção REGRAS DE NEGÓCIO (REGRAS-DE-NEGOCIO.md), com os
+# identificadores RN-* carimbados em cada bloqueio de envio.
+# 2.1.0 -> 2.2.0: entrou a RN-019 (status de pedido/pagamento/rastreio só com fonte
+# consultada) e a RN-008 passou a ter três modos de divulgação (nunca | sob_pergunta
+# | sempre), com `sob_pergunta` como padrão.
+# 2.0.0 -> 2.1.0: entrou a seção de PROTEÇÃO DE DADOS (RN-014..RN-018) — prazo de
+# guarda por tabela, expurgo automático, minimização do texto e direito do titular.
+RULES_VERSION = "2.2.0"
 
 # ---------- janelas e limites (PDF §05 e docs/05 §2) ----------
 DM_WINDOW_SECONDS = 24 * 60 * 60
@@ -182,12 +190,32 @@ A0_RULES: tuple[A0Rule, ...] = (
             r"\bme cortar\b",
             r"\bme machucar\b",
             r"\bnao vale a pena viver\b",
+            # Decisivos por serem quase inequívocos em DM de venda — e porque o
+            # custo do falso positivo aqui é uma pessoa do time olhar a conversa,
+            # contra o custo de não olhar.
+            r"\bquero desaparecer\b",
+            r"\bmelhor nao acordar\b",
+            r"\bnunca mais acordar\b",
+            r"\bnao quero mais estar aqui\b",
+            # "não vejo saída" sozinho é ambíguo (problema, dívida, prazo); com
+            # "da minha vida" deixa de ser.
+            r"\bnao vejo saida (pra|para) (a )?minha vida\b",
         ),
         corroborativos=(
             # Ambíguos sozinhos — hipérbole comum. Precisam de companhia.
             r"\bnao aguento mais\b",
             r"\bnao vejo sentido\b",
             r"\bacabar com tudo\b",
+            # Frases de crise que aparecem em texto real e NÃO estavam na lista:
+            # "não aguento mais, penso em desistir de tudo" só tinha um sinal e
+            # passava como conversa normal. Com duas, escala.
+            r"\bdesistir de tudo\b",
+            r"\bdesisti de tudo\b",
+            r"\bnao vejo saida\b",
+            r"\bnao tenho mais forca\b",
+            r"\bcansad[oa] de viver\b",
+            r"\bnao faz sentido continuar\b",
+            r"\bquero sumir\b",
         ),
     ),
     A0Rule(
@@ -346,6 +374,28 @@ A0_RULES: tuple[A0Rule, ...] = (
             r"\bme passa (pra|para) alguem\b",
             r"\btem alguem ai\b",
             r"\bsou humano\b",
+        ),
+    ),
+    A0Rule(
+        flag="dados_de_terceiro",
+        severity="P0",
+        human_label="DADOS DE TERCEIRO — não processar, não armazenar, encaminhar",
+        # docs/05 §3.3: conteúdo sensível de terceiro é A0. O agente não recebe
+        # documento, print ou cadastro de quem não é o titular da conversa — nem
+        # para "ajudar". Processar vira tratamento de dado sem base legal.
+        patterns=(
+            r"\bdocumento de outra pessoa\b",
+            r"\bdados de outra pessoa\b",
+            r"\bfoto de outra pessoa\b",
+            # "do meu" / "da minha": as duas contrações, porque o agente recebe
+            # tanto "documento do meu marido" quanto "comprovante da minha mae".
+            r"\bcpf d[ao] (meu|minha|meus|minhas)\b",
+            r"\bdocumento d[ao] (meu|minha|meus|minhas)\b",
+            r"\bcomprovante d[ao] (meu|minha|meus|minhas)\b",
+            r"\bconta d[ao] (meu|minha) (marido|esposa|pai|mae|filho|filha|irmao|irma|amigo|amiga)\b",
+            r"\bno nome d[ao] (meu|minha)\b",
+            r"\bcomprei no nome d[ao]\b",
+            r"\bestou mandando o (documento|cpf|rg|comprovante) d[ao]\b",
         ),
     ),
 )
@@ -549,6 +599,110 @@ CREATE TABLE IF NOT EXISTS lead_stage (
     score       INTEGER DEFAULT 0,
     updated_at  REAL
 );
+
+-- =====================================================================
+-- REGRAS DE NEGÓCIO (REGRAS-DE-NEGOCIO.md) — estado das RN-*
+-- =====================================================================
+
+-- RN-002/003/004/... — flag ativa por lead. É o que permite barrar envio
+-- comercial DEPOIS do LLM, quando o modelo já decidiu (ou foi convencido) a
+-- mandar preço/link para alguém em crise. Esquecer a flag é fácil; consultar
+-- uma tabela no caminho do envio, não.
+CREATE TABLE IF NOT EXISTS lead_flags (
+    igsid       TEXT NOT NULL,
+    flag        TEXT NOT NULL,
+    severity    TEXT,
+    at          REAL NOT NULL,
+    ativo       INTEGER DEFAULT 1,
+    PRIMARY KEY (igsid, flag)
+);
+
+-- RN-007 — todo toque PROATIVO (follow-up, reativação, aviso) fica registrado.
+-- Sem este registro a cota global é um número no prompt, não uma regra.
+CREATE TABLE IF NOT EXISTS toques_proativos (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    igsid       TEXT NOT NULL,
+    tipo        TEXT,
+    canal       TEXT DEFAULT 'instagram',
+    at          REAL NOT NULL
+);
+
+-- RN-009 — aprovação humana para ação de nível A1. A1 sem aprovação viva é
+-- bloqueada; é o que impede "só desta vez" virar autônomo.
+CREATE TABLE IF NOT EXISTS aprovacoes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    acao        TEXT NOT NULL,
+    igsid       TEXT DEFAULT '',
+    aprovado_por TEXT,
+    justificativa TEXT,
+    at          REAL NOT NULL,
+    expira_em   REAL,
+    usado_em    REAL
+);
+
+-- RN-012 — fila humana com SLA. A v2 do PDF dizia "prazos ainda precisam ser
+-- definidos"; sem prazo registrado não existe atraso a detectar.
+CREATE TABLE IF NOT EXISTS fila_humana (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    igsid       TEXT,
+    prioridade  TEXT,
+    motivo      TEXT,
+    resumo      TEXT,
+    aberto_em   REAL NOT NULL,
+    prazo_sla   REAL,
+    assumido_por TEXT,
+    assumido_em REAL,
+    resolvido_em REAL,
+    resolucao   TEXT,
+    alertas     INTEGER DEFAULT 0
+);
+
+-- RN-013 — livro-razão da moderação destrutiva. Sem autorização registrada,
+-- ocultar/excluir não acontece; e toda ação tem reversão rastreável.
+CREATE TABLE IF NOT EXISTS moderacao_aprovacoes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    comment_id  TEXT NOT NULL,
+    acao        TEXT NOT NULL,
+    autorizado_por TEXT,
+    justificativa TEXT,
+    at          REAL NOT NULL,
+    executado_em REAL,
+    revertido_em REAL,
+    revertido_por TEXT
+);
+
+-- =====================================================================
+-- PROTEÇÃO DE DADOS (RN-014..RN-018) — LGPD
+-- =====================================================================
+
+-- Mantém o relógio da última manutenção. Sem isto, o expurgo rodaria a cada
+-- evento (caro) ou nunca rodaria (pior): prazo que ninguém executa é enfeite.
+CREATE TABLE IF NOT EXISTS manutencao (
+    chave       TEXT PRIMARY KEY,
+    valor       REAL,
+    atualizado_em REAL
+);
+
+-- Bloqueio permanente SEM identidade: guarda só o hash do igsid. É o que permite
+-- honrar "nunca mais me contate" depois de o titular exercer o direito de
+-- exclusão, sem continuar guardando quem ele é. Sem isto, o expurgo apagaria a
+-- recusa junto com o dado — e a próxima campanha voltaria a falar com quem pediu
+-- para ser esquecido, que é a violação mais grave possível aqui.
+CREATE TABLE IF NOT EXISTS bloqueios_permanentes (
+    igsid_hash  TEXT PRIMARY KEY,
+    at          REAL NOT NULL,
+    motivo      TEXT
+);
+
+-- Prova de atendimento ao direito do titular, sem dado pessoal: só o hash, a data
+-- e as contagens do que foi apagado. Guardar o igsid aqui anularia o expurgo.
+CREATE TABLE IF NOT EXISTS exclusoes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    igsid_hash  TEXT NOT NULL,
+    at          REAL NOT NULL,
+    motivo      TEXT,
+    contagens   TEXT
+);
 """
 
 
@@ -619,11 +773,19 @@ def window_is_open(igsid: str, now: Optional[float] = None) -> bool:
 # ---------- opt-out ----------
 
 def is_opted_out(igsid: str) -> bool:
+    """Recusa registrada — inclui o bloqueio permanente por hash (RN-017).
+
+    O bloqueio por hash é o que sobra depois de um pedido de exclusão: o igsid já
+    não está mais guardado, mas a recusa continua honrada. Consultar só a tabela
+    `opt_outs` aqui reintroduziria o contato com quem pediu para ser esquecido —
+    exatamente o que o expurgo deveria tornar impossível.
+    """
+    if not igsid:
+        return False
     with db() as conn:
-        return (
-            conn.execute("SELECT 1 FROM opt_outs WHERE igsid = ?", (igsid,)).fetchone()
-            is not None
-        )
+        if conn.execute("SELECT 1 FROM opt_outs WHERE igsid = ?", (igsid,)).fetchone():
+            return True
+    return bloqueio_permanente_ativo(igsid)
 
 
 def add_opt_out(igsid: str, motivo: str = "") -> None:
@@ -1057,3 +1219,1396 @@ def stats(path: Optional[Path] = None) -> dict[str, int]:
             "followups": count("followups"),
             "lacunas": count("lacunas"),
         }
+
+
+# ===========================================================================
+# REGRAS DE NEGÓCIO — implementação das RN-* de REGRAS-DE-NEGOCIO.md
+#
+# Este bloco é a versão EXECUTÁVEL da seção de regras de negócio. Cada bloqueio
+# carrega o identificador `RN-nnn` da regra que o produziu, porque a pergunta que
+# se faz depois de um incidente não é "por que bloqueou?" — é "qual regra
+# aprovada autorizava (ou impedia) isto?".
+#
+# Divisão de responsabilidade:
+#   RN-001 vive em `_check_kill_switch()` + hook `pre_tool_call` (instagram_api.py),
+#          porque depende do caminho do arquivo de parada.
+#   RN-002..RN-013 vivem AQUI e são compostas por `avaliar_envio()`, chamada no
+#          caminho do envio. Nenhuma delas depende do modelo lembrar de nada.
+# ===========================================================================
+
+RN_PARADA_EMERGENCIA = "RN-001"
+RN_MENOR_IDADE = "RN-002"
+RN_CRISE_EMOCIONAL = "RN-003"
+RN_DADOS_DE_TERCEIRO = "RN-004"
+RN_OPT_OUT = "RN-005"
+RN_JANELA_HORARIO = "RN-006"
+RN_TETO_FREQUENCIA = "RN-007"
+RN_DIVULGACAO_AUTOMACAO = "RN-008"
+RN_MATRIZ_AUTONOMIA = "RN-009"
+RN_ALEGACOES_PROIBIDAS = "RN-010"
+RN_CONSUMIDOR = "RN-011"
+RN_ESPERA_HUMANA = "RN-012"
+RN_MODERACAO_DESTRUTIVA = "RN-013"
+
+SEVERIDADE_POR_FLAG = {
+    "crise_emocional": "P0",
+    "saude_mental": "P0",
+    "menor_idade": "P0",
+    "juridico": "P0",
+    "desespero_financeiro": "P0",
+    "dados_de_terceiro": "P0",
+    "reclamacao": "P1",
+    "pedido_desconto": "P1",
+    "pedido_humano": "P1",
+    "hostilidade": "P2",
+}
+
+# Flag ativa que PROÍBE conteúdo comercial (preço, link, oferta) para aquele
+# lead — não importa o que o modelo decidiu depois. É a implementação em código
+# da linha vermelha "crise emocional nunca vira oportunidade de venda" e da regra
+# da v2 §17: "o agente não continua vendendo durante uma reclamação não resolvida".
+FLAGS_QUE_BLOQUEIAM_COMERCIAL = {
+    "crise_emocional": RN_CRISE_EMOCIONAL,
+    "saude_mental": RN_CRISE_EMOCIONAL,
+    "desespero_financeiro": RN_CRISE_EMOCIONAL,
+    "menor_idade": RN_MENOR_IDADE,
+    "dados_de_terceiro": RN_DADOS_DE_TERCEIRO,
+    "juridico": RN_ESPERA_HUMANA,
+    "reclamacao": RN_ESPERA_HUMANA,
+}
+
+# ---------------------------------------------------------------------------
+# RN-002 / RN-003 / RN-004 — flag ativa por lead
+# ---------------------------------------------------------------------------
+
+def registrar_flag(igsid: str, flag: str, severity: str = "") -> None:
+    """Grava a flag ativa de um lead. É o que sobrevive ao próximo evento.
+
+    A0 já escala a conversa no intake; o que faltava era a flag sobreviver para
+    BLOQUEAR o envio comercial depois, quando o modelo — ou uma tentativa de
+    manipulação — decidisse mandar preço para quem está em crise.
+    """
+    if not igsid or not flag:
+        return
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO lead_flags (igsid, flag, severity, at, ativo) VALUES (?, ?, ?, ?, 1) "
+            "ON CONFLICT(igsid, flag) DO UPDATE SET severity = excluded.severity, "
+            "at = excluded.at, ativo = 1",
+            (igsid, flag, severity or SEVERIDADE_POR_FLAG.get(flag, ""), time.time()),
+        )
+
+
+def limpar_flag(igsid: str, flag: str = "") -> None:
+    """Desativa flag(s). Usado quando o humano resolve o caso (RN-012)."""
+    with db() as conn:
+        if flag:
+            conn.execute(
+                "UPDATE lead_flags SET ativo = 0 WHERE igsid = ? AND flag = ?", (igsid, flag)
+            )
+        else:
+            conn.execute("UPDATE lead_flags SET ativo = 0 WHERE igsid = ?", (igsid,))
+
+
+def flags_ativas(igsid: str) -> dict[str, str]:
+    """{flag: severidade} das flags ativas do lead."""
+    if not igsid:
+        return {}
+    with db() as conn:
+        linhas = conn.execute(
+            "SELECT flag, severity FROM lead_flags WHERE igsid = ? AND ativo = 1", (igsid,)
+        ).fetchall()
+    return {row["flag"]: (row["severity"] or "") for row in linhas}
+
+
+# ---------------------------------------------------------------------------
+# Detecção de conteúdo comercial e de link no TEXTO DE SAÍDA (RN-002/003/004)
+# ---------------------------------------------------------------------------
+
+_URL_RE = re.compile(
+    r"(https?://|www\.|\b[a-z0-9][a-z0-9-]*\.(com|com\.br|net|org|link|shop|store|app|io|me)\b)",
+    re.IGNORECASE,
+)
+_VALOR_RE = re.compile(
+    r"(r\$\s*\d|\b\d{2,}\s*reais\b|\br\$\s*\d+[,.]?\d*|\bpor apenas\b|\bparcelamos\b)",
+    re.IGNORECASE,
+)
+
+
+def contem_link(texto: str) -> bool:
+    return bool(_URL_RE.search(texto or ""))
+
+
+def contem_valor(texto: str) -> bool:
+    """Preço em texto. 'R$ 97', '97 reais', 'por apenas'.
+
+    Deliberadamente conservador: número solto NÃO conta como preço, senão
+    "3 pilares" ou "segunda às 19h" bloqueariam conversa legítima.
+    """
+    return bool(_VALOR_RE.search(texto or ""))
+
+
+# ---------------------------------------------------------------------------
+# RN-010 — alegações proibidas (guardrail de SAÍDA)
+#
+# docs/05 §4: "A lista de alegações proibidas precisa estar em dois lugares: no
+# prompt (prevenção) e no guardrail de saída (bloqueio). Prevenção falha;
+# bloqueio não pode falhar."
+#
+# Padrões aplicados ao texto NORMALIZADO (sem acento, minúsculo).
+# Conservadores de propósito: o custo do falso positivo aqui é uma venda perdida
+# por bloqueio indevido, e o custo do falso negativo é uma reclamação no Procon.
+# ---------------------------------------------------------------------------
+
+ALEGACOES_PROIBIDAS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "promessa_de_resultado",
+        (
+            r"\bvai faturar\b",
+            r"\bvai ficar rico\b",
+            r"\bresultado garantido\b",
+            r"\bgarantido que voce\b",
+            r"\bfunciona (100|cem por cento)\b",
+            r"\b100 por cento garantido\b",
+            r"\bcerteza absoluta\b",
+            r"\bvoce vai ganhar\b",
+            r"\bvai dar certo com certeza\b",
+            r"\bgaranto o resultado\b",
+        ),
+    ),
+    (
+        "promessa_de_prazo",
+        (
+            r"\bresultado em \d+\b",
+            r"\bem \d+ dias (voce|vai|sua)\b",
+            r"\bdentro de \d+ (dias|semanas|meses)\b.{0,25}\b(vai|resultado|funciona|muda)\b",
+            r"\bem \d+ (dias|semanas) ja (esta|estara|vai)\b",
+        ),
+    ),
+    (
+        "promessa_de_renda",
+        (
+            r"\brenda garantida\b",
+            r"\bganhar dinheiro facil\b",
+            r"\bdinheiro facil\b",
+            r"\bfaturar \d+",
+            r"\bganhar \d+ mil\b",
+            r"\bviver de renda\b",
+        ),
+    ),
+    (
+        "escassez_falsa",
+        (
+            r"\bultimas vagas\b",
+            r"\bultimas unidades\b",
+            r"\bso restam \d+\b",
+            r"\bacaba (hoje|essa semana)\b",
+            r"\bencerra (hoje|amanha)\b",
+            r"\bultima chance\b",
+        ),
+    ),
+    (
+        "urgencia_fabricada",
+        (
+            r"\bso hoje\b",
+            r"\bsomente hoje\b",
+            r"\bcorre que\b",
+            r"\bultimas horas\b",
+            r"\bpor tempo limitadissimo\b",
+        ),
+    ),
+    (
+        "linguagem_de_cura_ou_saude",
+        (
+            r"\bcura (a |o |sua |seu )?(depressao|ansiedade|doenca|transtorno|panico)\b",
+            r"\btrata (a |o |sua |seu )?(depressao|ansiedade|doenca|transtorno)\b",
+            r"\bsubstitui (o )?(remedio|medicacao|terapia)\b",
+            r"\bresolve sua (ansiedade|depressao)\b",
+        ),
+    ),
+    (
+        "garantia_de_transformacao",
+        (
+            r"\bvai mudar sua vida\b",
+            r"\btransforma(r)? sua vida\b",
+            r"\bsua vida muda em \d+\b",
+            r"\bmuda sua vida em \d+\b",
+        ),
+    ),
+)
+
+# Frases que o cliente pode liberar explicitamente (escassez/urgência reais e
+# aprovadas). Sem aprovação viva na tabela, continuam bloqueadas: "é verdade
+# mesmo" não é verificável em tempo de envio, e o custo do erro é assimétrico.
+_ALEGACOES_LIBERAVEIS = {"escassez_falsa", "urgencia_fabricada"}
+
+
+def detect_alegacao_proibida(texto: str) -> list[str]:
+    """Categorias de alegação proibida presentes no texto de saída."""
+    normalizado = normalize(texto)
+    achados: list[str] = []
+    for categoria, padroes in ALEGACOES_PROIBIDAS:
+        if any(re.search(p, normalizado) for p in padroes):
+            achados.append(categoria)
+    return achados
+
+
+# ---------------------------------------------------------------------------
+# RN-011 — prazo, garantia e devolução só com fonte aprovada
+#
+# CDC art. 49 dá 7 dias de arrependimento — esse número é lei, não promessa.
+# Qualquer OUTRO prazo, garantia ou condição é política comercial do cliente e
+# precisa existir em IG_POLITICA_CONSUMIDOR (.env). Inventar é publicidade
+# enganosa, e o agente inventa com boa intenção.
+# ---------------------------------------------------------------------------
+
+PADROES_CONSUMIDOR: tuple[str, ...] = (
+    r"\bgarantia de \d+\s*(dias|meses|anos)\b",
+    r"\b\d+\s*dias de garantia\b",
+    r"\b\d+\s*dias para (devolver|trocar|reembolsar)\b",
+    r"\b(devolucao|reembolso|troca) (em|no prazo de) \d+\b",
+    r"\bgarantia incondicional\b",
+    r"\bfrete gratis\b",
+    r"\bdevolucao gratis\b",
+)
+
+
+def detect_afirmacao_consumidor_sem_fonte(texto: str) -> list[str]:
+    """Alegações de garantia/devolução/frete que exigem política aprovada."""
+    normalizado = normalize(texto)
+    politica = normalize(os.getenv("IG_POLITICA_CONSUMIDOR", ""))
+    achados: list[str] = []
+    for padrao in PADROES_CONSUMIDOR:
+        for m in re.finditer(padrao, normalizado):
+            trecho = m.group(0)
+            if politica and trecho in politica:
+                continue  # está escrito na política aprovada: pode afirmar
+            achados.append(trecho)
+    return achados
+
+
+# ---------------------------------------------------------------------------
+# RN-008 — divulgação de automação (MECANISMO, desligado por padrão)
+#
+# Conflito real e ainda não resolvido pelo cliente:
+#   SOUL.md diz "nunca digo que sou uma inteligência artificial";
+#   docs/05 §2.2 regra 5 diz "não simular ser humano" (política da Meta) e o CDC
+#   exige identificação de comunicação comercial automatizada.
+#
+# Não cabe a este código decidir a persona do cliente. Então: o mecanismo existe
+# e é ligável por .env. Enquanto IG_DIVULGAR_AUTOMACAO não estiver ligada, o
+# comportamento é o atual — e a RN-008 fica registrada como ABERTA.
+# ---------------------------------------------------------------------------
+
+TEXTO_DIVULGACAO = (
+    "Sou o assistente automático do time do Edson — se preferir, chamo uma pessoa "
+    "do time pra continuar com você 👊"
+)
+
+# Três modos, porque "divulgar ou não" tem uma resposta do meio — e foi a escolhida:
+#
+#   nunca        -> a persona não se anuncia em hipótese alguma
+#   sob_pergunta -> diz a verdade quando perguntam, sem se anunciar sozinho
+#   sempre       -> anuncia na primeira interação relevante de toda conversa
+#
+# O padrão é `sob_pergunta`: não mente para quem pergunta, e não quebra a persona no
+# meio do funil. Modo `nunca` é uma decisão de risco, não de conforto — está
+# registrado como Pendência 1 no REGRAS-DE-NEGOCIO.md.
+MODOS_DIVULGACAO = ("nunca", "sob_pergunta", "sempre")
+DIVULGACAO_PADRAO = "sob_pergunta"
+
+# Escrito SEM acento: o `normalize()` roda antes, então "você" chega como "voce".
+PERGUNTAS_SOBRE_AUTOMACAO = (
+    r"\bvoce e (um |uma )?(robo|bot|ia|inteligencia artificial)\b",
+    r"\bisso (e|eh) (um |uma )?(robo|bot|automatico|automacao|ia)\b",
+    r"\b(e|eh) (um |uma )?(robo|bot|humano|pessoa) (mesmo|de verdade|real)\b",
+    r"\bvoce (e|eh) (humano|humana|real|de verdade|uma pessoa|pessoa)\b",
+    r"\b(estou|to) falando com (um |uma )?(robo|bot|humano|pessoa|maquina)\b",
+    r"\bfalo com (um |uma )?(robo|bot|humano|pessoa|maquina|atendente)\b",
+    r"\b(e|eh|isso e) atendimento (automatico|humano|robotico)\b",
+    r"\b(e|eh) (um |uma )?assistente virtual\b",
+    r"\bquem (esta|ta) (me )?(respondendo|falando|atendendo)\b",
+    r"\bnao (e|eh) (uma )?(pessoa|humano) de verdade\b",
+    r"\bvoce (e|eh) (mesmo )?(um )?(robo|bot)\b",
+)
+
+
+def modo_divulgacao() -> str:
+    """Modo configurado. Valor irreconhecível cai no PADRÃO, não em `nunca`.
+
+    Errar de digitação na variável não pode silenciar a divulgação: isso seria
+    decidir marca por acidente, e na direção mais arriscada.
+    """
+    bruto = (os.getenv("IG_DIVULGAR_AUTOMACAO", "") or "").strip().lower()
+    if not bruto:
+        return DIVULGACAO_PADRAO
+    if bruto in {"1", "true", "sim", "on", "sempre"}:
+        return "sempre"
+    if bruto in {"0", "false", "nao", "off", "nunca"}:
+        return "nunca"
+    if bruto in MODOS_DIVULGACAO:
+        return bruto
+    return DIVULGACAO_PADRAO
+
+
+def divulgacao_obrigatoria() -> bool:
+    """Só o modo `sempre` anuncia proativamente. Ver `divulgar_agora`."""
+    return modo_divulgacao() == "sempre"
+
+
+def pessoa_perguntou_se_e_automacao(texto: str) -> bool:
+    normalizado = normalize(texto or "")
+    return any(re.search(p, normalizado) for p in PERGUNTAS_SOBRE_AUTOMACAO)
+
+
+def divulgar_agora(texto: str = "") -> bool:
+    """A divulgação é devida NESTA mensagem?
+
+    Separar "anunciar sozinho" de "responder quando perguntam" é o ponto: o modo
+    `sob_pergunta` só dispara com pergunta direta, e é ele que evita a mentira por
+    omissão sem transformar todo primeiro contato num aviso de robô.
+    """
+    modo = modo_divulgacao()
+    if modo == "sempre":
+        return True
+    if modo == "sob_pergunta":
+        return pessoa_perguntou_se_e_automacao(texto)
+    return False
+
+
+def diretiva_divulgacao() -> str:
+    """Instrução obrigatória para o agente quando a divulgação é devida (RN-008)."""
+    return (
+        f"DIVULGAÇÃO OBRIGATÓRIA (RN-008): a pessoa perguntou se é automação. "
+        f"Responda a verdade, em uma linha, sem rodeio e sem se desculpar. "
+        f"Use exatamente este sentido: \"{TEXTO_DIVULGACAO}\""
+    )
+
+
+# ---------------------------------------------------------------------------
+# RN-009 — matriz de autonomia (docs/05 §5.2)
+# ---------------------------------------------------------------------------
+
+NIVEL_AUTONOMIA: dict[str, str] = {
+    # A3 — o agente age e reporta
+    "responder_elogio": "A3",
+    "agradecer": "A3",
+    "encerrar": "A3",
+    "aplicar_opt_out": "A3",
+    # A2 — o agente envia, humano audita
+    "responder_duvida_rag": "A2",
+    "private_reply_palavra_chave": "A2",
+    "pergunta_diagnostico": "A2",
+    "informar_preco": "A2",
+    "enviar_link": "A2",
+    "followup_janela": "A2",
+    "captura_whatsapp": "A2",
+    "quebrar_objecao": "A2",
+    "onboarding_pos_compra": "A2",
+    "reply_comment": "A2",
+    # A1 — humano aprova antes
+    "upsell": "A1",
+    "lead_alto_valor": "A1",
+    "pergunta_fora_da_base": "A1",
+    "imprensa_parceria": "A1",
+    "novo_produto": "A1",
+    "mudanca_prompt_tom": "A1",
+    # A0 — humano sempre. Não se automatiza em nenhuma fase de maturidade.
+    "desconto": "A0",
+    "negociacao_preco": "A0",
+    "reclamacao": "A0",
+    "reembolso": "A0",
+    "juridico": "A0",
+    "crise_emocional": "A0",
+    "desespero_financeiro": "A0",
+    "hostilidade": "A0",
+    "menor_idade": "A0",
+    "duvida_personalizada_sensivel": "A0",
+    "conteudo_sensivel": "A0",
+}
+
+A0_NUNCA_AUTOMATICO = True
+
+
+def nivel_da_acao(acao: str) -> str:
+    """Nível de autonomia da ação. Ação desconhecida é tratada como A2.
+
+    Decisão deliberada: bloquear por nome de ação desconhecido quebraria o
+    agente a cada ação nova. O buraco fica fechado por outro lado — a flag ativa
+    do lead (RN-002/003/004) barra o conteúdo comercial independentemente do
+    nome que o modelo der à ação.
+    """
+    return NIVEL_AUTONOMIA.get(acao or "", "A2")
+
+
+def registrar_aprovacao(
+    acao: str, *, igsid: str = "", aprovado_por: str = "", justificativa: str = "",
+    validade_minutos: int = 240,
+) -> int:
+    """Registra aprovação humana para uma ação A1 (ou libera escassez real)."""
+    agora = time.time()
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO aprovacoes (acao, igsid, aprovado_por, justificativa, at, expira_em) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (acao, igsid, aprovado_por, justificativa, agora,
+             agora + validade_minutos * 60),
+        )
+        return int(cur.lastrowid)
+
+
+def tem_aprovacao(acao: str, igsid: str = "", *, now: Optional[float] = None) -> bool:
+    """Existe aprovação viva (não expirada) para esta ação?"""
+    momento = now if now is not None else time.time()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM aprovacoes WHERE acao = ? AND (igsid = ? OR igsid = '') "
+            "AND (expira_em IS NULL OR expira_em > ?) LIMIT 1",
+            (acao, igsid or "", momento),
+        ).fetchone()
+    return row is not None
+
+
+def pode_executar(acao: str, igsid: str = "") -> tuple[bool, str, str]:
+    """(pode, regra, motivo) para a ação declarada pelo agente."""
+    if not acao:
+        return True, "", ""
+    nivel = nivel_da_acao(acao)
+    if nivel == "A0":
+        return (
+            False,
+            RN_MATRIZ_AUTONOMIA,
+            f"'{acao}' é A0: humano sempre. A0 não se automatiza em nenhuma fase.",
+        )
+    if nivel == "A1" and not tem_aprovacao(acao, igsid):
+        return (
+            False,
+            RN_MATRIZ_AUTONOMIA,
+            f"'{acao}' é A1: precisa de aprovação humana registrada e vigente.",
+        )
+    return True, "", ""
+
+
+# ---------------------------------------------------------------------------
+# RN-005 — opt-out é da PESSOA, não do canal
+#
+# A falha clássica: a pessoa pede para parar no Direct e o agente procura no
+# WhatsApp "porque o canal é outro". Opt-out vale para todos os canais.
+# ---------------------------------------------------------------------------
+
+def pode_contatar_por(igsid: str, canal: str = "") -> PreconditionResult:
+    if not igsid:
+        return PreconditionResult(True, "ok")
+    if is_opted_out(igsid):
+        return PreconditionResult(
+            False,
+            "opt_out",
+            f"Opt-out registrado. Vale para TODOS os canais, inclusive '{canal or 'desconhecido'}'.",
+        )
+    if (flags_ativas(igsid).get("crise_emocional")
+            or flags_ativas(igsid).get("saude_mental")
+            or flags_ativas(igsid).get("desespero_financeiro")):
+        return PreconditionResult(
+            False,
+            "alerta_sensivel",
+            "Conversa marcada como sensível. Nenhuma abordagem proativa.",
+        )
+    return PreconditionResult(True, "ok")
+
+
+# ---------------------------------------------------------------------------
+# RN-006 — janela e horário: só a abordagem PROATIVA respeita quiet hours
+#
+# Responder quem escreveu às 2h é conversa. Procurar alguém às 2h é assédio.
+# A distinção é `proativo=True`, declarada na chamada da tool.
+# ---------------------------------------------------------------------------
+
+# RN-007 — teto global de toques proativos, além da cota por estágio.
+PROATIVO_INTERVALO_MINIMO_H = 20
+PROATIVO_MAX_JANELA = 3
+PROATIVO_JANELA_DIAS = 14
+
+
+def registrar_toque_proativo(
+    igsid: str, tipo: str = "followup", canal: str = "instagram", at: Optional[float] = None
+) -> None:
+    if not igsid:
+        return
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO toques_proativos (igsid, tipo, canal, at) VALUES (?, ?, ?, ?)",
+            (igsid, tipo, canal, at if at is not None else time.time()),
+        )
+
+
+def toques_proativos_na_janela(
+    igsid: str, dias: int = PROATIVO_JANELA_DIAS, *, now: Optional[float] = None
+) -> int:
+    momento = now if now is not None else time.time()
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM toques_proativos WHERE igsid = ? AND at > ?",
+            (igsid, momento - dias * 86400),
+        ).fetchone()
+    return int(row["n"])
+
+
+def ultimo_toque_proativo(igsid: str) -> Optional[float]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT MAX(at) AS t FROM toques_proativos WHERE igsid = ?", (igsid,)
+        ).fetchone()
+    return None if not row or row["t"] is None else float(row["t"])
+
+
+def pode_tocar_proativo(
+    igsid: str, *, canal: str = "instagram", now: Optional[float] = None
+) -> PreconditionResult:
+    """Todas as pré-condições de uma abordagem proativa, em ordem de gravidade."""
+    momento = now if now is not None else time.time()
+
+    contato = pode_contatar_por(igsid, canal)
+    if not contato.ok:
+        return contato
+
+    if igsid and humano_no_comando(igsid):
+        return PreconditionResult(
+            False, "takeover_humano", "Humano no comando daquele caso. O agente não concorre."
+        )
+
+    if in_quiet_hours(to_brt(momento)):
+        return PreconditionResult(
+            False,
+            "quiet_hours",
+            f"Fora da janela {FOLLOWUP_QUIET_END}h–{FOLLOWUP_QUIET_START}h BRT. "
+            "Abordagem proativa só em horário humano.",
+        )
+
+    ultimo = ultimo_toque_proativo(igsid)
+    if ultimo is not None and (momento - ultimo) < PROATIVO_INTERVALO_MINIMO_H * 3600:
+        horas = (momento - ultimo) / 3600
+        return PreconditionResult(
+            False,
+            "toque_recente",
+            f"Último toque proativo há {horas:.1f}h. "
+            f"Intervalo mínimo é {PROATIVO_INTERVALO_MINIMO_H}h.",
+        )
+
+    total = toques_proativos_na_janela(igsid, PROATIVO_JANELA_DIAS, now=momento)
+    if total >= PROATIVO_MAX_JANELA:
+        return PreconditionResult(
+            False,
+            "teto_de_toques",
+            f"{total} toques proativos em {PROATIVO_JANELA_DIAS} dias "
+            f"(teto {PROATIVO_MAX_JANELA}). Insistir aqui é a definição de spam.",
+        )
+
+    return PreconditionResult(True, "ok")
+
+
+# ---------------------------------------------------------------------------
+# RN-012 — fila humana com SLA
+#
+# A v2 do documento dizia: "Responsáveis, prioridades e prazos internos ainda
+# precisam ser definidos." Prazo não definido é prazo que ninguém descumpre —
+# então o SLA fica aqui, em dados, com o momento em que o caso estourou.
+#
+# Consequência de projeto: com o caso ASSUMIDO, o agente silencia (RN-012).
+# Caso aberto e ainda não assumido NÃO bloqueia — é justamente a janela em que
+# o agente envia a mensagem de acolhimento aprovada.
+# ---------------------------------------------------------------------------
+
+SLA_MINUTOS: dict[str, int] = {"P0": 15, "P1": 60, "P2": 240, "P3": 1440}
+
+
+def sla_minutos(prioridade: str) -> int:
+    return SLA_MINUTOS.get((prioridade or "").upper(), SLA_MINUTOS["P3"])
+
+
+def abrir_caso_humano(
+    *, igsid: str = "", prioridade: str = "P3", motivo: str = "", resumo: str = "",
+    now: Optional[float] = None,
+) -> int:
+    """Abre (ou reaproveita) o caso na fila humana, com prazo de SLA."""
+    momento = now if now is not None else time.time()
+    aberto = caso_aberto(igsid) if igsid else None
+    if aberto:
+        # Já existe caso vivo: rebaixa o prazo se a prioridade subiu, e não abre
+        # uma segunda linha — fila duplicada é fila que ninguém lê.
+        if _SEVERITY_ORDER.get(prioridade, 9) < _SEVERITY_ORDER.get(
+            aberto["prioridade"] or "P3", 9
+        ):
+            with db() as conn:
+                conn.execute(
+                    "UPDATE fila_humana SET prioridade = ?, motivo = ?, prazo_sla = ? WHERE id = ?",
+                    (prioridade, motivo, momento + sla_minutos(prioridade) * 60, aberto["id"]),
+                )
+        return int(aberto["id"])
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO fila_humana (igsid, prioridade, motivo, resumo, aberto_em, prazo_sla) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (igsid, prioridade, motivo, resumo[:2000], momento,
+             momento + sla_minutos(prioridade) * 60),
+        )
+        return int(cur.lastrowid)
+
+
+def caso_aberto(igsid: str) -> Optional[dict]:
+    """Caso humano vivo (não resolvido) daquele contato."""
+    if not igsid:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM fila_humana WHERE igsid = ? AND resolvido_em IS NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (igsid,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def humano_no_comando(igsid: str) -> bool:
+    """True quando uma pessoa assumiu o caso. O agente não concorre com ela."""
+    caso = caso_aberto(igsid)
+    return bool(caso and caso.get("assumido_por"))
+
+
+def assumir_caso_humano(caso_id: int, por: str = "", now: Optional[float] = None) -> None:
+    momento = now if now is not None else time.time()
+    with db() as conn:
+        conn.execute(
+            "UPDATE fila_humana SET assumido_por = ?, assumido_em = ? WHERE id = ? AND resolvido_em IS NULL",
+            (por or "time", momento, caso_id),
+        )
+
+
+def resolver_caso_humano(
+    caso_id: int, *, resolucao: str = "", por: str = "", libera_flags: bool = True
+) -> None:
+    """Fecha o caso. Por padrão limpa as flags do lead: o humano resolveu, o
+    agente volta a poder trabalhar normalmente (RN-002/003 deixam de valer)."""
+    with db() as conn:
+        row = conn.execute("SELECT igsid FROM fila_humana WHERE id = ?", (caso_id,)).fetchone()
+        conn.execute(
+            "UPDATE fila_humana SET resolvido_em = ?, resolucao = ? WHERE id = ?",
+            (time.time(), resolucao[:2000], caso_id),
+        )
+    if libera_flags and row:
+        limpar_flag(row["igsid"])
+
+
+def casos_fora_do_sla(now: Optional[float] = None) -> list[dict]:
+    """Casos abertos e não assumidos cujo prazo estourou. É a métrica que prova
+    que o SLA existe — sem isto, o prazo é decorativo.
+
+    Ordem: **gravidade primeiro, atraso depois**. Numa fila de plantão, a crise
+    de 5 minutos com prazo de 15 vem antes da dúvida de 30 minutos com prazo de
+    60 — ordenar só por atraso colocaria a coisa menos urgente no topo da lista
+    que o time lê.
+    """
+    momento = now if now is not None else time.time()
+    with db() as conn:
+        linhas = conn.execute(
+            "SELECT * FROM fila_humana WHERE resolvido_em IS NULL AND assumido_por IS NULL "
+            "AND prazo_sla IS NOT NULL AND prazo_sla < ? "
+            "ORDER BY CASE prioridade WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 "
+            "WHEN 'P2' THEN 2 ELSE 3 END ASC, prazo_sla ASC",
+            (momento,),
+        ).fetchall()
+    fora = []
+    for row in linhas:
+        caso = dict(row)
+        caso["atraso_minutos"] = int((momento - caso["prazo_sla"]) / 60)
+        fora.append(caso)
+    return fora
+
+
+def registrar_alerta_caso(caso_id: int) -> None:
+    """Conta quantas vezes este caso já foi cobrado. Caso reincidente é caso
+    sem dono — e isso precisa aparecer no relatório, não sumir na fila."""
+    with db() as conn:
+        conn.execute("UPDATE fila_humana SET alertas = alertas + 1 WHERE id = ?", (caso_id,))
+
+
+def fila_resumo(now: Optional[float] = None) -> dict:
+    momento = now if now is not None else time.time()
+    with db() as conn:
+        aberto = conn.execute(
+            "SELECT COUNT(*) AS n FROM fila_humana WHERE resolvido_em IS NULL"
+        ).fetchone()["n"]
+        assumido = conn.execute(
+            "SELECT COUNT(*) AS n FROM fila_humana WHERE resolvido_em IS NULL AND assumido_por IS NOT NULL"
+        ).fetchone()["n"]
+        resolvido = conn.execute(
+            "SELECT COUNT(*) AS n FROM fila_humana WHERE resolvido_em IS NOT NULL"
+        ).fetchone()["n"]
+    return {
+        "abertos": int(aberto),
+        "assumidos": int(assumido),
+        "resolvidos": int(resolvido),
+        "fora_do_sla": len(casos_fora_do_sla(momento)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# RN-013 — moderação destrutiva exige autorização registrada
+#
+# docs/05 e a v2 do PDF §14 dizem a mesma coisa: "o agente não recebe autorização
+# geral para apagar comentários" e "exclusão exige critério objetivo e
+# autorização". Aqui isso vira livro-razão: sem linha de autorização com nome,
+# não há ocultação nem exclusão — e toda execução tem reversão rastreável.
+#
+# NÃO existe hoje tool destrutiva no plugin (só responder). Ou seja: a regra
+# está armada para o dia em que existir, e a ausência da tool já é fail-closed.
+# ---------------------------------------------------------------------------
+
+MODERACAO_DESTRUTIVA = {"ocultar", "ocultacao", "excluir", "exclusao", "banir"}
+MODERACAO_REVERSIVEL = {"reexibir", "reexibicao", "restaurar"}
+
+
+def autorizar_moderacao(
+    comment_id: str, acao: str, *, autorizado_por: str = "", justificativa: str = "",
+) -> int:
+    if acao not in MODERACAO_DESTRUTIVA:
+        raise ValueError(
+            f"'{acao}' não é ação destrutiva — não precisa de autorização registrada."
+        )
+    if not autorizado_por:
+        raise ValueError("Autorização de moderação destrutiva exige QUEM autorizou.")
+    if not justificativa.strip():
+        raise ValueError("Autorização de moderação destrutiva exige critério objetivo.")
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO moderacao_aprovacoes (comment_id, acao, autorizado_por, justificativa, at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (comment_id, acao, autorizado_por, justificativa[:1000], time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def moderacao_autorizada(comment_id: str, acao: str) -> bool:
+    if acao in MODERACAO_REVERSIVEL:
+        return True  # reexibir corrige um erro: não se pede autorização para consertar
+    if acao not in MODERACAO_DESTRUTIVA:
+        return False
+    with db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM moderacao_aprovacoes WHERE comment_id = ? AND acao = ? "
+            "AND revertido_em IS NULL LIMIT 1",
+            (comment_id, acao),
+        ).fetchone()
+    return row is not None
+
+
+def marcar_moderacao_executada(comment_id: str, acao: str) -> int:
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE moderacao_aprovacoes SET executado_em = ? "
+            "WHERE comment_id = ? AND acao = ? AND executado_em IS NULL",
+            (time.time(), comment_id, acao),
+        )
+        return cur.rowcount
+
+
+def reverter_moderacao(comment_id: str, acao: str, *, revertido_por: str = "") -> int:
+    """Reexibição: registra a reversão. Erro de moderação corrigido é dado de
+    qualidade do agente, não vexame a esconder."""
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE moderacao_aprovacoes SET revertido_em = ?, revertido_por = ? "
+            "WHERE comment_id = ? AND acao = ? AND revertido_em IS NULL",
+            (time.time(), revertido_por, comment_id, acao),
+        )
+        return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# avaliar_envio — a composição de TODAS as RN-* de saída
+#
+# Ponto único de decisão, chamado por instagram_api._autorizar() no caminho do
+# envio. Devolve a lista de bloqueios (vazia = pode enviar). Cada bloqueio traz
+# a regra que o produziu, porque auditoria sem número de regra não é auditoria.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Bloqueio:
+    regra: str
+    motivo: str
+    detalhe: str = ""
+
+    def to_dict(self) -> dict:
+        return {"regra": self.regra, "motivo": self.motivo, "detalhe": self.detalhe}
+
+    def __str__(self) -> str:
+        return f"[{self.regra}] {self.motivo}" + (f" — {self.detalhe}" if self.detalhe else "")
+
+
+def avaliar_envio(
+    *,
+    texto: str = "",
+    igsid: str = "",
+    canal: str = "instagram",
+    proativo: bool = False,
+    acao: str = "",
+    agora: Optional[float] = None,
+) -> list[Bloqueio]:
+    """Todas as regras de negócio que antecedem um envio. Ordem = gravidade.
+
+    Deliberadamente NÃO inclui a RN-001 (kill switch): ela vive em
+    `_check_kill_switch()` e no hook, e duplicá-la aqui criaria duas verdades
+    sobre a mesma parada de emergência.
+    """
+    bloqueios: list[Bloqueio] = []
+    texto = texto or ""
+
+    # RN-005 — opt-out é da pessoa, vale em todo canal (aqui, os não-Instagram;
+    # no Instagram quem barra é _check_opt_out, com a exceção da despedida).
+    if igsid and canal != "instagram" and is_opted_out(igsid):
+        bloqueios.append(
+            Bloqueio(
+                RN_OPT_OUT,
+                f"Opt-out registrado para este contato. Vale também para '{canal}'.",
+                "Opt-out é permanente e não se transfere de canal.",
+            )
+        )
+
+    # RN-002/003/004 — lead com flag sensível ativa não recebe conteúdo comercial.
+    # Não importa o que o modelo decidiu: preço e link não saem.
+    if igsid and (contem_link(texto) or contem_valor(texto)):
+        ativas = flags_ativas(igsid)
+        for flag, regra in FLAGS_QUE_BLOQUEIAM_COMERCIAL.items():
+            if flag in ativas:
+                bloqueios.append(
+                    Bloqueio(
+                        regra,
+                        f"Lead com '{flag}' ativo não recebe preço nem link.",
+                        "Acolher e encaminhar. Conteúdo comercial aqui é a linha que não se move.",
+                    )
+                )
+                break
+
+    # RN-012 — humano assumiu: o agente silencia naquela conversa.
+    if igsid and humano_no_comando(igsid):
+        caso = caso_aberto(igsid) or {}
+        bloqueios.append(
+            Bloqueio(
+                RN_ESPERA_HUMANA,
+                f"Atendimento humano no comando (caso {caso.get('id')}).",
+                "Respostas automáticas concorrentes estão suspensas por política.",
+            )
+        )
+
+    # RN-006 / RN-007 — só a abordagem PROATIVA tem horário e teto.
+    if proativo and igsid:
+        liberacao = pode_tocar_proativo(igsid, canal=canal, now=agora)
+        if not liberacao.ok:
+            regra = (
+                RN_JANELA_HORARIO
+                if liberacao.motivo in {"quiet_hours"}
+                else RN_TETO_FREQUENCIA
+            )
+            bloqueios.append(Bloqueio(regra, liberacao.motivo, liberacao.detalhe))
+
+    # RN-009 — matriz de autonomia da ação declarada.
+    if acao:
+        pode, regra, motivo = pode_executar(acao, igsid)
+        if not pode:
+            bloqueios.append(Bloqueio(regra, motivo))
+
+    # RN-010 — alegações proibidas no texto de saída.
+    alegacoes = detect_alegacao_proibida(texto)
+    if alegacoes:
+        ainda_bloqueadas = [
+            categoria
+            for categoria in alegacoes
+            if not (
+                categoria in _ALEGACOES_LIBERAVEIS
+                and tem_aprovacao(f"alegacao_{categoria}", igsid)
+            )
+        ]
+        if ainda_bloqueadas:
+            bloqueios.append(
+                Bloqueio(
+                    RN_ALEGACOES_PROIBIDAS,
+                    "Alegação proibida no texto: " + ", ".join(ainda_bloqueadas),
+                    "Reescreva sem promessa de resultado, prazo, renda, cura, "
+                    "escassez ou urgência inventada.",
+                )
+            )
+
+    # RN-011 — prazo, garantia e devolução exigem política aprovada.
+    consumidor = detect_afirmacao_consumidor_sem_fonte(texto)
+    if consumidor:
+        bloqueios.append(
+            Bloqueio(
+                RN_CONSUMIDOR,
+                "Afirmação de garantia/devolução/frete sem fonte aprovada: "
+                + ", ".join(sorted(set(consumidor))),
+                "Preencha IG_POLITICA_CONSUMIDOR no .env ou não afirme a condição.",
+            )
+        )
+
+    # RN-019 — status de pedido, pagamento e rastreio exigem FONTE CONSULTADA.
+    #
+    # O Documento Mestre cita Bling 36x, Clint 45x e rastreio 19x; o agente não tem
+    # nenhuma dessas integrações. Sem esta regra, o caminho natural é o modelo
+    # improvisar um status plausível — afirmação falsa com a assinatura do cliente.
+    # Enquanto não houver fonte, a resposta honesta é "não consigo ver aqui" e
+    # escalar. No dia em que o token existir, o bloqueio se desfaz sozinho.
+    if not status_pedido_disponivel():
+        sem_fonte = detect_afirmacao_status_sem_fonte(texto)
+        if sem_fonte:
+            bloqueios.append(
+                Bloqueio(
+                    RN_STATUS_SEM_FONTE,
+                    "Status de pedido/pagamento/rastreio sem fonte: "
+                    + ", ".join(sorted(set(sem_fonte))),
+                    "Não há integração com Bling/Clint configurada. Diga que você "
+                    "não consegue consultar e escale para humano — não estime, não "
+                    "suponha, não prometa verificar.",
+                )
+            )
+
+    return bloqueios
+
+
+def pior_severidade(flags) -> str:
+    """A severidade mais grave entre hits de A0 — usada para o SLA da fila humana.
+
+    Aceita objetos FlagHit (usa `.severity`) ou strings de severidade. Não existe
+    severidade conhecida: devolve P3, o menor impacto — nunca P0, senão todo caso
+    sem classificação viraria alarme de 15 minutos e a fila perderia o valor.
+    """
+    severidades = [getattr(f, "severity", f) for f in (flags or [])]
+    validas = [s for s in severidades if s in _SEVERITY_ORDER]
+    if not validas:
+        return "P3"
+    return min(validas, key=lambda s: _SEVERITY_ORDER[s])
+
+
+# ===========================================================================
+# RN-014 a RN-018 — PROTEÇÃO DE DADOS (LGPD)
+#
+# Por que este bloco existe: as RN-001..013 diziam o que o agente pode FAZER.
+# Nenhuma dizia o que ele pode GUARDAR, por quanto tempo, nem o que fazer quando
+# o titular pedir para apagar. O banco de estado acumulava então: o texto da
+# mensagem enviada (followups.mensagem), a pergunta literal da pessoa
+# (lacunas.pergunta) e — o pior — o briefing com o texto da crise dentro da fila
+# humana (fila_humana.resumo), que ainda era impresso numa mensagem de Telegram.
+# Dado sensível ligado a identificador, sem prazo, saindo do perímetro.
+#
+# o que estas regras NÃO fazem: não substituem a revisão jurídica nem definem a
+# base legal — isso é declarado pelo cliente (ver Pendências do
+# REGRAS-DE-NEGOCIO.md). Elas impõem o que é imponível em código.
+# ===========================================================================
+
+RN_MINIMIZACAO = "RN-014"
+RN_RETENCAO = "RN-015"
+RN_DADO_SENSIVEL = "RN-016"
+RN_DIREITO_TITULAR = "RN-017"
+RN_RELATORIO_SEM_DADO = "RN-018"
+
+# Prazo de guarda por tabela, em dias. Cada número tem de aguentar a pergunta
+# "por que não 1 dia?" e "por que não 1 ano?" — prazo inventado é prazo que
+# ninguém defende na hora em que o cliente perguntar.
+RETENCAO_DIAS: dict[str, int] = {
+    # Conteúdo literal da pessoa. Curto: serve para a mineração semanal, não para
+    # histórico. 30 dias = 4 ciclos de mineração.
+    "lacunas": 30,
+    # Ids de evento: existem só para descartar reentrega da Meta. Não são dado de
+    # pessoa nenhuma — 7 dias bastam.
+    "processed": 7,
+    # Quem falou com a conta nas últimas 24h. É lista de identificadores: some.
+    "inbound": 30,
+    # Texto que o agente enviou. 90 dias cobre a auditoria de tom e o plantão.
+    "followups": 90,
+    # Só casos RESOLVIDOS (caso aberto é obrigação pendente, não histórico).
+    "fila_humana": 90,
+    # MARCA sensível (crise, saúde, menor). 90 dias: marca a pessoa pelo tempo do
+    # atendimento e não para sempre. Marca eterna é o que a LGPD proíbe.
+    "lead_flags": 90,
+    "private_replies": 180,
+    "toques_proativos": 180,
+    "interactions": 180,
+    # Estágio no funil — é dado sobre a pessoa (o que ela quis comprar). Mesmo
+    # prazo da interação. Este campo ficou sem prazo na primeira versão deste
+    # bloco e o teste `test_toda_tabela_de_estado_tem_prazo_definido` pegou.
+    "lead_stage": 180,
+    # Prova de autorização humana — auditoria. Fica mais.
+    "aprovacoes": 365,
+    "moderacao_aprovacoes": 365,
+    "exclusoes": 365,
+}
+
+# Tabelas que NÃO expiram, e são só estas duas. A decisão é deliberada:
+# - `opt_outs`: o registro da recusa é a própria base para não contatar de novo.
+#   Apagar a recusa é transformar opt-out em consentimento — o oposto do que a
+#   pessoa pediu.
+# - `bloqueios_permanentes`: o bloqueio pós-exclusão, guardado só como hash. Não
+#   tem dado pessoal, e apagá-lo faria o expurgo virar a causa de uma reabordagem.
+RETENCAO_PERMANENTE = frozenset({"opt_outs", "bloqueios_permanentes"})
+
+_CHAVE_EXPURGO = "ultimo_expurgo"
+
+
+def mascarar_id(igsid: str, *, tamanho: int = 6) -> str:
+    """Hash curto do identificador, para relatório e Telegram (RN-018).
+
+    O igsid é dado pessoal (identificador de conta). Relatório de plantão que
+    circula em app de mensagem não é lugar para ele. O número do CASO é interno e
+    não identifica ninguém — é por ele que o time abre o atendimento.
+    """
+    if not igsid:
+        return "-"
+    return "…" + hashlib.sha256(igsid.encode("utf-8")).hexdigest()[:tamanho]
+
+
+def redigir(texto: str, *, limite: int = 160) -> str:
+    """Tira do texto o que identifica ou é sensível, antes de guardar (RN-014).
+
+    Não é anonimização — é minimização. O texto continua reconhecível como
+    assunto; deixa de carregar documento, telefone, e-mail ou arroba.
+    """
+    limpo = re.sub(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b", "[cpf]", texto or "")
+    limpo = re.sub(r"\b\d{2}\s?\d{4,5}-?\d{4}\b", "[telefone]", limpo)
+    limpo = re.sub(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b", "[email]", limpo)
+    limpo = re.sub(r"@[\w.]{2,}", "[arroba]", limpo)
+    limpo = re.sub(r"\b\d{11,}\b", "[numero]", limpo)
+    limpo = re.sub(r"\s+", " ", limpo).strip()
+    return limpo[:limite]
+
+
+def resumo_para_fila(decisao) -> str:
+    """Resumo do caso humano SEM o texto da pessoa (RN-014).
+
+    O caso precisa dizer O QUE aconteceu (motivo, severidade, flags) para o time
+    agir; não precisa repetir O QUE a pessoa escreveu. Era exatamente aí que o
+    texto da crise ia parar no Telegram.
+    """
+    flags = ",".join(sorted(getattr(h, "flag", "") for h in (decisao.flags or []))) or "-"
+    return redigir(
+        f"{getattr(decisao, 'motivo', '') or '-'} · severidade "
+        f"{getattr(decisao, 'severity', '-') or '-'} · flags {flags}"
+    )
+
+
+def expurgar_expirados(now: Optional[float] = None) -> dict[str, int]:
+    """Apaga o que passou do prazo de guarda (RN-015). Idempotente.
+
+    Duas regras que não são óbvias e por isso estão em código:
+
+    1. `fila_humana` só expurga caso RESOLVIDO. Caso aberto é obrigação pendente:
+       apagá-lo não seria proteger o titular, seria esconder um atendimento que
+       ninguém fez.
+    2. `opt_outs` não é tocada. A recusa é o motivo de não voltar a falar com a
+       pessoa — ver RETENCAO_PERMANENTE.
+    """
+    momento = now if now is not None else time.time()
+    apagados: dict[str, int] = {}
+
+    def corte(tabela: str) -> float:
+        return momento - RETENCAO_DIAS[tabela] * 86400
+
+    consultas = (
+        ("lacunas", "DELETE FROM lacunas WHERE at < ?", lambda: (corte("lacunas"),)),
+        ("processed", "DELETE FROM processed WHERE at < ?", lambda: (corte("processed"),)),
+        ("inbound", "DELETE FROM inbound WHERE last_seen < ?", lambda: (corte("inbound"),)),
+        ("followups", "DELETE FROM followups WHERE COALESCE(enviado_em, due_at, 0) < ?",
+         lambda: (corte("followups"),)),
+        ("fila_humana",
+         "DELETE FROM fila_humana WHERE resolvido_em IS NOT NULL AND resolvido_em < ?",
+         lambda: (corte("fila_humana"),)),
+        ("lead_flags", "DELETE FROM lead_flags WHERE at < ?", lambda: (corte("lead_flags"),)),
+        ("private_replies", "DELETE FROM private_replies WHERE sent_at < ?",
+         lambda: (corte("private_replies"),)),
+        ("toques_proativos", "DELETE FROM toques_proativos WHERE at < ?",
+         lambda: (corte("toques_proativos"),)),
+        ("interactions", "DELETE FROM interactions WHERE received_at < ?",
+         lambda: (corte("interactions"),)),
+        ("lead_stage", "DELETE FROM lead_stage WHERE COALESCE(updated_at, 0) < ?",
+         lambda: (corte("lead_stage"),)),
+        ("aprovacoes", "DELETE FROM aprovacoes WHERE at < ?", lambda: (corte("aprovacoes"),)),
+        ("moderacao_aprovacoes", "DELETE FROM moderacao_aprovacoes WHERE at < ?",
+         lambda: (corte("moderacao_aprovacoes"),)),
+        ("exclusoes", "DELETE FROM exclusoes WHERE at < ?", lambda: (corte("exclusoes"),)),
+    )
+
+    with db() as conn:
+        for tabela, sql, argumentos in consultas:
+            cursor = conn.execute(sql, argumentos())
+            apagados[tabela] = cursor.rowcount if cursor.rowcount > 0 else 0
+    return apagados
+
+
+def expurgar_se_preciso(*, intervalo_horas: int = 24, now: Optional[float] = None) -> dict[str, int]:
+    """Roda o expurgo no máximo uma vez por intervalo. Marca no banco.
+
+    Existe para o expurgo não depender de alguém lembrar de rodar um script, e
+    não rodar a cada evento recebido.
+    """
+    momento = now if now is not None else time.time()
+    with db() as conn:
+        linha = conn.execute(
+            "SELECT valor FROM manutencao WHERE chave = ?", (_CHAVE_EXPURGO,)
+        ).fetchone()
+
+    if linha and linha["valor"] and (momento - linha["valor"]) < intervalo_horas * 3600:
+        return {}
+
+    apagados = expurgar_expirados(now=momento)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO manutencao (chave, valor, atualizado_em) VALUES (?,?,?) "
+            "ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor, "
+            "atualizado_em=excluded.atualizado_em",
+            (_CHAVE_EXPURGO, momento, momento),
+        )
+    return apagados
+
+
+def expurgar_marcar_falha(now: Optional[float] = None) -> None:
+    """Não marca o expurgo como feito quando ele falhou.
+
+    Se a marca fosse gravada mesmo com exceção, a falha silenciosa ficaria 24h no
+    lugar — e retenção que não roda é o pior estado possível: o dado continua lá e
+    o relatório diz que foi tratado.
+    """
+    momento = now if now is not None else time.time()
+    with db() as conn:
+        conn.execute(
+            "DELETE FROM manutencao WHERE chave = ? AND valor IS NULL", (_CHAVE_EXPURGO,)
+        )
+
+
+_TABELAS_COM_IGSID = (
+    ("lead_flags", "igsid"),
+    ("lead_stage", "igsid"),
+    ("interactions", "igsid"),
+    ("followups", "igsid"),
+    ("lacunas", "igsid"),
+    ("toques_proativos", "igsid"),
+    ("aprovacoes", "igsid"),
+    ("fila_humana", "igsid"),
+    ("inbound", "igsid"),
+    ("opt_outs", "igsid"),
+)
+
+
+def exportar_titular(igsid: str) -> dict:
+    """Direito de acesso (LGPD art. 18, II) — tudo o que existe sobre a pessoa.
+
+    Limite honesto: `private_replies`, `processed` e `moderacao_aprovacoes` são
+    chaveados por comentário/evento, não por igsid — não há como ligá-los à pessoa
+    por esta via. Isso está dito aqui porque quem responde ao titular precisa saber
+    o que NÃO foi incluído.
+    """
+    dados: dict[str, list[dict]] = {}
+    with db() as conn:
+        for tabela, coluna in _TABELAS_COM_IGSID:
+            linhas = conn.execute(
+                f"SELECT * FROM {tabela} WHERE {coluna} = ?", (igsid,)  # noqa: S608
+            ).fetchall()
+            dados[tabela] = [dict(linha) for linha in linhas]
+
+    return {
+        "igsid": igsid,
+        "gerado_em_brt": now_brt().isoformat(),
+        "rules_version": RULES_VERSION,
+        "tabelas": dados,
+        "nao_incluido": ["private_replies", "processed", "moderacao_aprovacoes"],
+    }
+
+
+def apagar_titular(igsid: str, *, motivo: str = "") -> dict:
+    """Direito de eliminação (LGPD art. 18, VI).
+
+    Duas decisões que definem se isto é eliminação ou teatro:
+
+    1. **O bloqueio de contato sobrevive ao apagamento**, em `bloqueios_permanentes`
+       e só como hash. Se apagasse a recusa junto com o dado, a pessoa que pediu
+       para ser esquecida seria abordada na próxima campanha — o apagamento viraria
+       a causa da violação.
+    2. **A prova do atendimento não guarda o igsid**, só o hash e as contagens.
+       Guardar quem pediu o apagamento é manter exatamente o dado que se apagou.
+    """
+    contagens: dict[str, int] = {}
+    with db() as conn:
+        for tabela, coluna in _TABELAS_COM_IGSID:
+            if tabela == "opt_outs":
+                continue
+            cursor = conn.execute(
+                f"DELETE FROM {tabela} WHERE {coluna} = ?", (igsid,)  # noqa: S608
+            )
+            contagens[tabela] = cursor.rowcount if cursor.rowcount > 0 else 0
+
+        # A recusa vira bloqueio permanente por hash.
+        recusou = conn.execute(
+            "SELECT COUNT(*) AS n FROM opt_outs WHERE igsid = ?", (igsid,)
+        ).fetchone()["n"]
+        conn.execute("DELETE FROM opt_outs WHERE igsid = ?", (igsid,))
+        contagens["opt_outs"] = recusou
+
+        hash_id = hashlib.sha256(igsid.encode("utf-8")).hexdigest()
+        conn.execute(
+            "INSERT OR REPLACE INTO bloqueios_permanentes (igsid_hash, at, motivo) VALUES (?,?,?)",
+            (hash_id, time.time(), motivo or "direito ao esquecimento"),
+        )
+        conn.execute(
+            "INSERT INTO exclusoes (igsid_hash, at, motivo, contagens) VALUES (?,?,?,?)",
+            (hash_id, time.time(), motivo or "direito ao esquecimento",
+             json.dumps(contagens, ensure_ascii=False, sort_keys=True)),
+        )
+
+    return {
+        "igsid_apagado": mascarar_id(igsid),
+        "contagens": contagens,
+        "bloqueio_permanente": True,
+        "at": now_brt().isoformat(),
+    }
+
+
+def bloqueio_permanente_ativo(igsid: str) -> bool:
+    """A pessoa pediu eliminação antes? Então nunca mais falar com ela."""
+    if not igsid:
+        return False
+    hash_id = hashlib.sha256(igsid.encode("utf-8")).hexdigest()
+    with db() as conn:
+        linha = conn.execute(
+            "SELECT 1 FROM bloqueios_permanentes WHERE igsid_hash = ?", (hash_id,)
+        ).fetchone()
+    return linha is not None
+
+
+# ===========================================================================
+# RN-019 — Status de pedido, pagamento e rastreio só com FONTE CONSULTADA
+#
+# O Documento Mestre cita Bling 36x, Clint 45x, rastreio 19x e "pedido" 34x. O agente
+# entregue tem ZERO linha de integração. Sem esta regra, o caminho natural é o modelo
+# improvisar um status plausível — "seu pedido foi enviado, chega em 3 dias úteis" —
+# e isso é afirmação falsa com a assinatura do cliente, muito pior do que não ter a
+# integração.
+#
+# A regra não diz "não fale de pedido": diz "não afirme o que não consultou". No dia em
+# que BLING_API_TOKEN existir, `status_pedido_disponivel()` devolve True e o bloqueio
+# se desfaz por CONFIGURAÇÃO — sem editar regra, sem tocar em teste.
+# ===========================================================================
+
+RN_STATUS_SEM_FONTE = "RN-019"
+
+try:  # o motor não pode quebrar se o módulo de integrações faltar
+    from integracoes import status_pedido_disponivel as _status_pedido_disponivel
+except Exception:  # noqa: BLE001  # pragma: no cover
+    def _status_pedido_disponivel() -> bool:  # type: ignore[misc]
+        return False
+
+
+def status_pedido_disponivel() -> bool:
+    """Há fonte para afirmar status de pedido/pagamento/rastreio?
+
+    Adapter quebrado NÃO libera afirmação: qualquer falha vira `False`, porque o
+    custo do falso "indisponível" é o agente dizer "não consigo ver aqui" e o custo
+    do falso "disponível" é afirmar ao cliente um status que ninguém consultou.
+    """
+    try:
+        return bool(_status_pedido_disponivel())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def integracoes_status() -> dict[str, bool]:
+    """Retrato honesto do que existe, para o briefing. Nunca levanta."""
+    try:
+        from integracoes import status_integracoes
+
+        return status_integracoes()
+    except Exception:  # noqa: BLE001
+        return {
+            "bling": False,
+            "clint": False,
+            "whatsapp": False,
+            "status_de_pedido": False,
+        }
+
+
+AFIRMACOES_DE_STATUS = (
+    (
+        "pedido_enviado",
+        (
+            r"\bpedido (ja )?(foi )?(enviado|postado|despachado)\b",
+            r"\b(foi|ja foi) (enviado|postado|despachado)\b",
+            r"\bsaiu para entrega\b",
+            r"\bfoi despachado\b",
+        ),
+    ),
+    (
+        "previsao_de_entrega",
+        (
+            r"\bchega (em|ate) \d+\b",
+            r"\bprevisao de entrega\b",
+            r"\bem \d+ dias uteis\b",
+            r"\bentrega (em|para|dia) \d+\b",
+        ),
+    ),
+    (
+        "em_transito",
+        (
+            r"\b(esta|ta) em transito\b",
+            r"\bem rota de entrega\b",
+            r"\bja esta com a transportadora\b",
+        ),
+    ),
+    (
+        "pagamento_confirmado",
+        (
+            r"\bpagamento (foi )?(aprovado|confirmado|recebido)\b",
+            r"\bcompra (foi )?(aprovada|confirmada)\b",
+            r"\bpix (foi )?(caiu|recebido|confirmado)\b",
+            r"\bboleto (foi )?(pago|compensado)\b",
+        ),
+    ),
+    (
+        "codigo_de_rastreio",
+        (
+            r"\bcodigo de rastreio\b",
+            r"\bnumero de rastreio\b",
+            r"\bcodigo de acompanhamento\b",
+            r"\brastreio (e|esta)\b",
+        ),
+    ),
+    (
+        "promessa_de_verificar",
+        (
+            r"\bvou (verificar|consultar|checar) (o |seu |a )?(pedido|rastreio|pagamento|entrega)\b",
+            r"\bdeixa eu (ver|consultar|checar) (o |seu )?(pedido|rastreio|pagamento)\b",
+            r"\bvou olhar (o |seu )?pedido\b",
+        ),
+    ),
+)
+
+
+def detect_afirmacao_status_sem_fonte(texto: str) -> list[str]:
+    """Categorias de afirmação sobre pedido/pagamento/rastreio no texto de saída.
+
+    Inclui `promessa_de_verificar` de propósito: prometer conferir um pedido que não
+    se pode conferir é a mesma mentira com uma etapa a mais.
+    """
+    normalizado = normalize(texto or "")
+    achados: list[str] = []
+    for categoria, padroes in AFIRMACOES_DE_STATUS:
+        if any(re.search(padrao, normalizado) for padrao in padroes):
+            achados.append(categoria)
+    return achados
+
+
+def diretiva_sem_integracao() -> str:
+    """Proibição permanente enquanto não houver integração (RN-019)."""
+    return (
+        "STATUS DE PEDIDO (RN-019): não há integração com Bling, Clint nem rastreio "
+        "configurada. Você NÃO consegue consultar pedido, pagamento, entrega nem "
+        "rastreio. Não afirme, não estime, não diga 'provavelmente já saiu' e não "
+        "prometa verificar. Diga em uma linha que você não consegue ver isso daqui e "
+        "encaminhe para o time, que confere e responde."
+    )
+
+
+

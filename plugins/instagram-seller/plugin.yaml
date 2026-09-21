@@ -1,9 +1,15 @@
 name: instagram-seller
-version: 0.1.0
+version: 0.4.0
 description: >-
   Ferramentas de envio no Instagram (DM, resposta privada a comentário,
   resposta pública) com as regras da Meta impostas em CÓDIGO — janela de 24h,
-  private reply única por comentário, e kill switch.
+  private reply única por comentário, e kill switch. Impõe também as REGRAS DE
+  NEGÓCIO (RN-001..RN-013): horário e teto de abordagem proativa, matriz de
+  autonomia A0–A3, alegações proibidas, garantia só com fonte aprovada, fila
+  humana com SLA e moderação destrutiva autorizada. E a PROTEÇÃO DE DADOS
+  (RN-014..RN-018): prazo de guarda por tabela, expurgo automático, minimização
+  do texto guardado e direito de acesso e eliminação do titular. Todo bloqueio
+  volta com o identificador da regra.
 
 provides_tools:
   - ig_send_dm

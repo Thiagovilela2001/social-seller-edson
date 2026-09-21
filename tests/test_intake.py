@@ -20,6 +20,11 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[1]
 SCRIPT = RAIZ / "scripts" / "instagram-intake.py"
 
+# A versão das regras é afirmada contra a CONSTANTE, nunca contra um literal:
+# um teste que fixa "1.0.0" não testa nada e quebra a cada subida de versão.
+sys.path.insert(0, str(RAIZ / "plugins" / "instagram-seller"))
+import rules  # noqa: E402
+
 CONTA = "17841400000000000"  # id da conta do Edson (recipient/entry.id)
 FULANO = "1234567890"  # igsid do cliente
 
@@ -143,7 +148,7 @@ class TestContrato(IntakeBase):
 
     def test_payload_traz_auditoria(self) -> None:
         d = self.saida(comentario("oi"))
-        self.assertEqual(d["auditoria"]["rules_version"], "1.0.0")
+        self.assertEqual(d["auditoria"]["rules_version"], rules.RULES_VERSION)
         self.assertTrue(d["auditoria"]["interaction_id"])
         self.assertTrue(d["auditoria"]["event_id"])
 
@@ -259,9 +264,61 @@ class TestRegistroDaInteracao(IntakeBase):
         linha = dict(linhas[0])
         self.assertEqual(linha["recommended_action"], "responder")
         self.assertIsNone(linha["executed_action"], "nada foi executado ainda")
-        self.assertEqual(linha["rules_version"], "1.0.0")
+        self.assertEqual(linha["rules_version"], rules.RULES_VERSION)
         self.assertEqual(linha["attribution_method"], "organico_publicacao")
         self.assertEqual(linha["interaction_id"], d["auditoria"]["interaction_id"])
+
+
+class TestBriefingFalaDoMundoReal(IntakeBase):
+    """Estes testes existem por um bug real, e o bug explica por que eles são aqui.
+
+    O intake lia `evento["texto"]`, mas a chave do evento normalizado é `text`. O
+    `divulgar_automacao` saía **sempre `false`** — e o teste unitário do motor, que
+    chama `rules.divulgar_agora("voce e um robo?")` direto, passava verde. A regra era
+    código morto no caminho de produção.
+
+    Lição: testar a unidade prova a REGRA; só atravessar o script prova a LIGAÇÃO.
+    Nome de chave errado não aparece em teste de unidade.
+    """
+
+    def test_pergunta_sobre_automacao_dispara_divulgacao_no_caminho_real(self) -> None:
+        d = self.saida(comentario("voce e um robo?"))
+        self.assertTrue(
+            d["estado"]["perguntou_sobre_automacao"],
+            "a pergunta sobre automação tem de ser reconhecida pelo intake",
+        )
+        self.assertTrue(d["estado"]["divulgar_automacao"])
+        self.assertTrue(
+            any("RN-008" in x for x in d["diretivas_obrigatorias"]),
+            "divulgação devida precisa virar DIRETIVA, não só um campo de estado",
+        )
+
+    def test_conversa_normal_nao_dispara_divulgacao(self) -> None:
+        d = self.saida(comentario("quanto custa o livro?"))
+        self.assertFalse(d["estado"]["perguntou_sobre_automacao"])
+        self.assertFalse(d["estado"]["divulgar_automacao"])
+        self.assertFalse(any("RN-008" in x for x in d["diretivas_obrigatorias"]))
+
+    def test_modo_de_divulgacao_aparece_com_a_constante_do_motor(self) -> None:
+        d = self.saida(comentario("oi, tudo bem?"))
+        self.assertEqual(d["estado"]["modo_divulgacao"], rules.DIVULGACAO_PADRAO)
+
+    def test_proibicao_de_status_vem_em_toda_mensagem(self) -> None:
+        """A RN-019 vale para toda saída, não só para quem fala de pedido — porque o
+        agente pode puxar o assunto sozinho."""
+        d = self.saida(comentario("quanto custa o livro?"))
+        self.assertTrue(any("RN-019" in p for p in d["proibicoes"]))
+        self.assertFalse(
+            d["estado"]["integracoes"]["status_de_pedido"],
+            "sem BLING_API_TOKEN não existe fonte de status de pedido",
+        )
+
+    def test_pergunta_sobre_pedido_continua_sendo_respondida(self) -> None:
+        """A RN-019 proíbe o agente AFIRMAR status; a pergunta da pessoa não pode
+        virar bloqueio, senão o cliente fica sem resposta nenhuma."""
+        d = self.saida(comentario("onde esta meu pedido?"))
+        self.assertEqual(d["decisao"]["acao"], "responder")
+        self.assertTrue(d["decisao"]["permitir_agente"])
 
 
 if __name__ == "__main__":

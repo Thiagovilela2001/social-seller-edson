@@ -24,6 +24,25 @@ SEND_DM = {
                 "type": "string",
                 "description": "Texto da mensagem. Máximo 3 linhas.",
             },
+            "proativo": {
+                "type": "boolean",
+                "description": (
+                    "Marque TRUE quando você está PROCURANDO a pessoa (follow-up, "
+                    "reativação, aviso que ela não pediu). Abordagem proativa só sai "
+                    "em horário humano (8h–21h BRT) e respeita teto de toques. "
+                    "Deixe FALSE quando está respondendo algo que ela acabou de mandar."
+                ),
+            },
+            "acao": {
+                "type": "string",
+                "description": (
+                    "Ação declarada, para a matriz de autonomia. Use, por exemplo: "
+                    "informar_preco, enviar_link, responder_duvida_rag, upsell, "
+                    "captura_whatsapp, desconto, reembolso. Ações A0 (desconto, "
+                    "reclamação, reembolso, crise) e A1 (upsell, alto valor) "
+                    "são recusadas sem humano."
+                ),
+            },
         },
         "required": ["igsid", "text"],
     },
@@ -50,6 +69,10 @@ PRIVATE_REPLY = {
                 "type": "string",
                 "description": "Texto puro. Sem link, sem anexo, sem botão.",
             },
+            "acao": {
+                "type": "string",
+                "description": "Ação declarada (matriz de autonomia). Ex.: private_reply_palavra_chave.",
+            },
         },
         "required": ["comment_id", "text"],
     },
@@ -74,6 +97,10 @@ REPLY_COMMENT = {
             "text": {
                 "type": "string",
                 "description": "Resposta curta e leve. Máximo 2 linhas.",
+            },
+            "acao": {
+                "type": "string",
+                "description": "Ação declarada (matriz de autonomia). Ex.: reply_comment.",
             },
         },
         "required": ["comment_id", "text"],

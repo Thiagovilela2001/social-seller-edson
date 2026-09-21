@@ -40,6 +40,13 @@ KILL_SWITCH = Path(
 
 # Motivos A0 que exigem humano — o agente não envia, só escala.
 # Em produção isto vem do banco (leads.alerta_sensivel / flags).
+#
+# ⚠️ TENSÃO CONHECIDA, e é por isso que este hook é a camada GROSSA (desligada
+# por padrão): ele bloqueia TODO envio enquanto a flag A0 estiver ativa —
+# inclusive a mensagem de acolhimento aprovada, que DEVE sair (RN-012 permite
+# acolher, proíbe vender). A camada fina é a do caminho do envio
+# (`rules.avaliar_envio` → RN-002/003/004), que distingue as duas coisas.
+# Ligue este hook sabendo que ele para o acolhimento também.
 A0_FLAGS = {
     "alerta_sensivel",
     "reclamacao",
@@ -47,6 +54,11 @@ A0_FLAGS = {
     "pedido_desconto",
     "menor_idade",
     "hostilidade",
+    # Adicionados com a seção de regras de negócio (RN-002/003/004):
+    "crise_emocional",
+    "saude_mental",
+    "desespero_financeiro",
+    "dados_de_terceiro",
 }
 
 

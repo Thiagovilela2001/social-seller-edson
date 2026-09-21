@@ -145,6 +145,68 @@ hermes -p social-seller-edson logs --follow
 
 ---
 
+## Regras de negócio
+
+O agente impõe regras de negócio em **código**, não em instrução para o modelo. Elas estão
+escritas e numeradas em `REGRAS-DE-NEGOCIO.md` (RN-001 a RN-013): parada de emergência, menor
+de idade, crise emocional, dados de terceiro, opt-out por pessoa, horário e teto da abordagem
+proativa, divulgação de automação, matriz de autonomia, alegações proibidas, garantia só com
+fonte aprovada, fila humana com SLA e moderação destrutiva autorizada.
+
+Quando um envio é recusado, o motivo vem carimbado com a regra:
+
+```
+[RN-010] alegacao_proibida — promessa_de_resultado
+```
+
+Duas delas dependem de uma decisão do Edson e vêm **na posição mais conservadora** até que ele
+responda:
+
+| Variável | Padrão | O que muda |
+|---|---|---|
+| `IG_DIVULGAR_AUTOMACAO` | `false` | `true` faz o agente se anunciar como assistente automatizado |
+| `IG_POLITICA_CONSUMIDOR` | vazio | Sem ela, o agente **não** afirma garantia, prazo de devolução nem frete grátis |
+
+Nenhuma das duas quebra nada se ficar como está — só mantém a resposta mais cautelosa.
+As pendências completas estão no fim do `REGRAS-DE-NEGOCIO.md`.
+
+### Integrações — o que o agente NÃO pode fazer
+
+A v2 promete Bling, Clint, WhatsApp e rastreio. O código não tem nenhum deles, e
+`plugins/instagram-seller/integracoes.py` registra isso em vez de deixar o modelo
+improvisar: **não há status de pedido**. A **RN-019** bloqueia, no caminho do envio,
+qualquer afirmação sobre pedido, pagamento, entrega ou rastreio — inclusive a promessa
+de verificar ("vou checar seu pedido"). Enquanto `BLING_API_TOKEN` não existir, a
+resposta honesta é "não consigo ver isso daqui" e o encaminhamento para o time.
+
+No dia em que a credencial entrar no `.env`, o bloqueio cai sozinho: é
+configuração, não edição de regra. Faltam a leitura e a credencial (Pendência 10).
+
+### Identidade: o agente se anuncia?
+
+`IG_DIVULGAR_AUTOMACAO` tem três modos — `nunca`, `sob_pergunta` (**padrão decidido**) e
+`sempre`. No padrão, o agente **não se anuncia sozinho** e **não mente se perguntarem**:
+quem pergunta "você é um robô?" recebe a verdade em uma linha. `true` equivale a
+`sempre` (compatibilidade) e valor desconhecido cai no padrão, nunca em `nunca`.
+
+As regras RN-014 a RN-018 tratam do que o agente **guarda**, não do que ele faz. Elas
+são o que impede o agente de virar um arquivo de dados sensíveis sem prazo:
+
+- **Cada tabela tem prazo de guarda** (7 dias para id de evento, 90 para marca sensível,
+  365 para prova de autorização humana) e o expurgo **roda sozinho**, no máximo uma vez
+  por dia. Se falhar, o briefing mostra `expurgo: falhou`.
+- **O texto da pessoa não é copiado para dentro do agente.** O caso humano registra o
+  motivo e a gravidade (`crise_emocional · P0`), não a mensagem.
+- **Direito do titular:** `rules.exportar_titular(igsid)` devolve tudo que existe sobre a
+  pessoa; `rules.apagar_titular(igsid)` apaga. Depois de apagar, o bloqueio de contato
+  continua valendo — por hash, sem guardar quem é.
+- **Relatório não leva igsid.** O alerta do Telegram identifica o caso pelo número interno.
+
+Duas tabelas não expiram, de propósito: `opt_outs` (a recusa é a base para não contatar)
+e `bloqueios_permanentes` (o bloqueio pós-exclusão, só com hash).
+
+---
+
 ## Desligar tudo, na hora
 
 Existe um botão de pânico que bloqueia **todo** envio no Instagram. Para usá-lo, descubra a

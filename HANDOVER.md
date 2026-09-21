@@ -17,7 +17,7 @@ Rode na máquina do cliente, em ordem. Cada passo tem critério de conclusão.
 | 4 | `hermes -p social-seller-edson plugins doctor plugins/instagram-seller` | Aprovado, sem imports legados |
 | 5 | `hermes -p social-seller-edson plugins list` | `instagram-seller` com status `enabled` |
 | 6 | `hermes -p social-seller-edson chat -q "quem é você?"` | **Responde como "time do Edson"**, não como assistente genérico |
-| 7 | `hermes -p social-seller-edson cron list` | Os 2 jobs listados como **paused** |
+| 7 | `hermes -p social-seller-edson cron list` | Os 3 jobs listados como **paused** |
 | 8 | `hermes -p social-seller-edson cron resume sse-followup-janela` | Job passa a `scheduled` |
 | 9 | `hermes -p social-seller-edson gateway start` | Gateway no ar; `curl localhost:8644/health` → `{"status":"ok"}` |
 | 10 | `hermes -p social-seller-edson tools list` | `ig_send_dm`, `ig_private_reply`, `ig_reply_comment` visíveis |
@@ -153,11 +153,27 @@ fica com buraco. Vale acompanhar no modo copiloto. Ver PDF §13.
 
 ## 4. Pendências com o cliente antes do go-live
 
+> As seis primeiras viraram tabela em `REGRAS-DE-NEGOCIO.md` § *Pendências*, com o que cada
+> resposta muda no comportamento do agente. Nenhuma é técnica.
+
+- [ ] **Divulgar que é automação?** — o mecanismo está pronto e desligado por padrão
+      (`IG_DIVULGAR_AUTOMACAO=false`, RN-008). Muda a voz do agente na cara do cliente.
+- [ ] **Política de garantia / devolução / frete por escrito** — sem ela o agente não afirma
+      nada disso (RN-011), nem o que é direito legal do consumidor. Fail-closed de propósito.
+- [ ] Confirmar **horário (8h–21h) e teto (3 toques/14 dias)** da abordagem proativa (RN-006/007)
+- [ ] Definir **quem é o plantão** que recebe o alerta da fila humana e confere o SLA
 - [ ] Aprovação explícita da identidade **"time do Edson"**
 - [ ] Lista oficial de produtos, preços, garantias e links
 - [ ] "O que eu nunca falaria para um cliente" — as linhas vermelhas dele
+- [ ] **Credenciais das integrações** (`BLING_API_TOKEN`, `CLINT_MCP_URL`,
+      `WHATSAPP_TOKEN`) — é o que separa a RN-019 de virar recurso. Regra, interfaces
+      e testes já estão no lugar; falta o acesso.
 - [ ] Aprovação da matriz de moderação (critérios e autonomia por ação)
-- [ ] Definição do humano de plantão e dos SLAs
+- [ ] **Declarar finalidade, base legal e encarregado (DPO)** — sem encarregado não há
+      quem responda ao titular no prazo da LGPD (RN-014..RN-018)
+- [ ] **Validar com o jurídico os prazos de retenção** da tabela da RN-015
+- [ ] **Ligar o CRM ao direito do titular** — a RN-017 cobre o banco do agente; dado em
+      Bling/Clint/planilha fica fora do alcance dela
 - [ ] Revisão jurídica: LGPD, termos, política de privacidade, alegações
 - [ ] **App Meta no nome do cliente**, com Business Verification e App Review aprovados
 - [ ] Validação em conta de teste: janela de 24h, cota única de private reply, e a restrição de
