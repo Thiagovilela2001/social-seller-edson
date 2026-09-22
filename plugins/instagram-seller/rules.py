@@ -38,12 +38,17 @@ from typing import Any, Iterable, Optional
 #
 # 1.x -> 2.0.0: entrou a seção REGRAS DE NEGÓCIO (REGRAS-DE-NEGOCIO.md), com os
 # identificadores RN-* carimbados em cada bloqueio de envio.
+# 2.2.0 -> 2.3.0: parecer OpenClaw. Entram a RN-020 (vínculo de identidade antes da
+#   ação) e a RN-021 (efeito externo com resultado desconhecido), e são corrigidos os
+#   achados F01 (privada usava a chamada da pública), F02 (identidade vazia nas rotas
+#   de comentário), F03 (token liberava afirmação sem consulta) e F04 (ação/proatividade
+#   autodeclaradas e opcionais).
 # 2.1.0 -> 2.2.0: entrou a RN-019 (status de pedido/pagamento/rastreio só com fonte
 # consultada) e a RN-008 passou a ter três modos de divulgação (nunca | sob_pergunta
 # | sempre), com `sob_pergunta` como padrão.
 # 2.0.0 -> 2.1.0: entrou a seção de PROTEÇÃO DE DADOS (RN-014..RN-018) — prazo de
 # guarda por tabela, expurgo automático, minimização do texto e direito do titular.
-RULES_VERSION = "2.2.0"
+RULES_VERSION = "2.3.0"
 
 # ---------- janelas e limites (PDF §05 e docs/05 §2) ----------
 DM_WINDOW_SECONDS = 24 * 60 * 60
@@ -537,6 +542,26 @@ CREATE TABLE IF NOT EXISTS inbound (
 CREATE TABLE IF NOT EXISTS private_replies (
     comment_id  TEXT PRIMARY KEY,
     sent_at     REAL NOT NULL
+);
+
+-- Efeito externo com resultado DESCONHECIDO (parecer OpenClaw, F05).
+--
+-- Existe porque "falhou" e "não sei se saiu" são estados diferentes. Um timeout
+-- depois do envio não prova que a mensagem saiu nem que não saiu — e as duas
+-- suposições erradas custam caro: repetir duplica a resposta ao cliente; não
+-- repetir deixa o cliente sem resposta. Sem esta tabela, a única saída era
+-- escolher uma das duas no escuro.
+CREATE TABLE IF NOT EXISTS reconciliacao (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    comment_id    TEXT,
+    igsid         TEXT,
+    acao          TEXT,
+    canal         TEXT,
+    estado        TEXT NOT NULL,   -- incerto | enviado | nao_enviado
+    detalhe       TEXT,
+    criado_em     REAL NOT NULL,
+    resolvido_em  REAL,
+    resolvido_por TEXT
 );
 CREATE TABLE IF NOT EXISTS opt_outs (
     igsid       TEXT PRIMARY KEY,
@@ -2050,6 +2075,7 @@ def avaliar_envio(
     canal: str = "instagram",
     proativo: bool = False,
     acao: str = "",
+    exige_acao: bool = False,
     agora: Optional[float] = None,
 ) -> list[Bloqueio]:
     """Todas as regras de negócio que antecedem um envio. Ordem = gravidade.
@@ -2057,6 +2083,10 @@ def avaliar_envio(
     Deliberadamente NÃO inclui a RN-001 (kill switch): ela vive em
     `_check_kill_switch()` e no hook, e duplicá-la aqui criaria duas verdades
     sobre a mesma parada de emergência.
+
+    `exige_acao=True` é o modo do caminho das FERRAMENTAS (achado F04 do parecer
+    OpenClaw): ali a omissão da ação bloqueia, porque "não declarou" não pode valer
+    como "não tem restrição".
     """
     bloqueios: list[Bloqueio] = []
     texto = texto or ""
@@ -2110,10 +2140,34 @@ def avaliar_envio(
             bloqueios.append(Bloqueio(regra, liberacao.motivo, liberacao.detalhe))
 
     # RN-009 — matriz de autonomia da ação declarada.
+    #
+    # Achado F04 do parecer OpenClaw: `acao` era opcional e a matriz só rodava quando
+    # ele existia — então OMITIR o campo desligava a verificação. A decisão de quais
+    # permissões se aplicam não pode sair do próprio pedido que está sendo autorizado.
+    # Agora: vocabulário fechado (ação desconhecida bloqueia) e, no caminho das
+    # ferramentas, omissão também bloqueia.
     if acao:
-        pode, regra, motivo = pode_executar(acao, igsid)
-        if not pode:
-            bloqueios.append(Bloqueio(regra, motivo))
+        if acao not in NIVEL_AUTONOMIA:
+            bloqueios.append(
+                Bloqueio(
+                    RN_MATRIZ_AUTONOMIA,
+                    f"Ação fora do vocabulário fechado: '{acao}'.",
+                    "Ação sem nível de autonomia definido não é autorizada por "
+                    "omissão nem por renomeação. Use uma do vocabulário.",
+                )
+            )
+        else:
+            pode, regra, motivo = pode_executar(acao, igsid)
+            if not pode:
+                bloqueios.append(Bloqueio(regra, motivo))
+    elif exige_acao:
+        bloqueios.append(
+            Bloqueio(
+                RN_MATRIZ_AUTONOMIA,
+                "Ação não declarada (omissão não é autorização).",
+                "Reenvie declarando uma `acao` do vocabulário fechado.",
+            )
+        )
 
     # RN-010 — alegações proibidas no texto de saída.
     alegacoes = detect_alegacao_proibida(texto)
@@ -2238,6 +2292,9 @@ RETENCAO_DIAS: dict[str, int] = {
     "aprovacoes": 365,
     "moderacao_aprovacoes": 365,
     "exclusoes": 365,
+    # Reconciliação de efeito incerto: auditoria de o que saiu ou não saiu. 365 pelo
+    # mesmo motivo da prova de aprovação — é o registro que responde "foi enviado?".
+    "reconciliacao": 365,
 }
 
 # Tabelas que NÃO expiram, e são só estas duas. A decisão é deliberada:
@@ -2391,6 +2448,7 @@ _TABELAS_COM_IGSID = (
     ("fila_humana", "igsid"),
     ("inbound", "igsid"),
     ("opt_outs", "igsid"),
+    ("reconciliacao", "igsid"),
 )
 
 
@@ -2609,6 +2667,194 @@ def diretiva_sem_integracao() -> str:
         "prometa verificar. Diga em uma linha que você não consegue ver isso daqui e "
         "encaminhe para o time, que confere e responde."
     )
+
+
+# ===========================================================================
+# RN-020 — Vínculo de identidade antes da ação
+#
+# Achado F02 do parecer OpenClaw: os handlers de `ig_private_reply` e
+# `ig_reply_comment` chamavam o envio SEM igsid. O parâmetro tem valor vazio por
+# padrão e as verificações eram puladas EM SILÊNCIO (`if igsid:`), não bloqueadas.
+# O motor conhecia a restrição e a ferramenta chegava sem o vínculo para aplicá-la.
+# Dar nomes diferentes às funções não muda o destino da chamada; omitir a identidade
+# desligava a proteção.
+#
+# A correção não é "lembrar de passar o parâmetro" — quem lembra hoje esquece
+# amanhã, e um teste que injeta o igsid à mão não prova o caminho real. É resolver o
+# autor NO SERVIDOR, a partir do registro que o próprio intake gravou, e RECUSAR
+# quando o vínculo não for confiável.
+# ===========================================================================
+
+RN_VINCULO_IDENTIDADE = "RN-020"
+
+MOTIVOS_VINCULO = {
+    "comentario_sem_vinculo": (
+        "Comentário sem registro de autor. Sem vínculo confiável, a ação que exige "
+        "identificação não segue."
+    ),
+    "alvo_de_outra_pessoa": (
+        "O igsid declarado não é o autor deste comentário. Comentário de terceiro "
+        "não é alvo."
+    ),
+}
+
+
+def igsid_do_comentario(comment_id: str) -> str:
+    """Autor do comentário, pelo registro que o intake gravou.
+
+    Devolve "" quando não há vínculo — e "" NÃO é permissão. Quem chama trata como
+    bloqueio (`vinculo_confiavel`), nunca como "sem restrição".
+    """
+    if not comment_id:
+        return ""
+    with db() as conn:
+        linha = conn.execute(
+            "SELECT igsid FROM interactions WHERE comment_id = ? "
+            "AND igsid IS NOT NULL AND igsid != '' "
+            "ORDER BY received_at DESC LIMIT 1",
+            (comment_id,),
+        ).fetchone()
+    return (linha["igsid"] if linha else "") or ""
+
+
+def vinculo_confiavel(comment_id: str, igsid: str = "") -> tuple[bool, str]:
+    """(ok, motivo). O vínculo entre ação e pessoa é confiável?
+
+    Reprova em três casos, e nenhum deles é "seguir com cautela":
+
+    - comentário sem registro → não se sabe de quem é;
+    - registro sem autor → idem;
+    - igsid declarado diferente do dono do comentário → é o alvo de outra pessoa
+      (critério T06 do parecer: comentário de terceiro não é alvo).
+    """
+    if not comment_id:
+        return False, "comentario_sem_vinculo"
+    dono = igsid_do_comentario(comment_id)
+    if not dono:
+        return False, "comentario_sem_vinculo"
+    if igsid and igsid != dono:
+        return False, "alvo_de_outra_pessoa"
+    return True, ""
+
+
+def vinculo_resolver(comment_id: str, igsid: str = "") -> str:
+    """O igsid a usar na ação, ou levanta `VinculoInsuficiente`.
+
+    Ponto ÚNICO de resolução: nenhuma ferramenta de comentário deve montar o igsid
+    por conta própria, senão a correção do F02 volta a depender de quem lembra.
+    """
+    ok, motivo = vinculo_confiavel(comment_id, igsid)
+    if not ok:
+        raise VinculoInsuficiente(motivo)
+    return igsid or igsid_do_comentario(comment_id)
+
+
+class VinculoInsuficiente(PermissionError):
+    """Levantada quando não há vínculo confiável entre a ação e a pessoa (RN-020).
+
+    O motivo entra na mensagem como CHAVE (`alvo_de_outra_pessoa`) além da prosa: o
+    log de auditoria precisa de um rótulo estável para contar ocorrências, e o
+    operador precisa da frase que explica.
+    """
+
+    def __init__(self, motivo: str) -> None:
+        self.motivo = motivo
+        prosa = MOTIVOS_VINCULO.get(motivo, motivo)
+        super().__init__(f"[{RN_VINCULO_IDENTIDADE}] {motivo}: {prosa}")
+
+
+# ---------- reconciliação: efeito externo com resultado desconhecido ----------
+#
+# Achado F05 do parecer OpenClaw: "um arquivo de falhas, sozinho, não comprova
+# recuperação automática". E o pedido explícito: "distinguir recusa confirmada de
+# resultado desconhecido". Esta é a regra que sustenta essa distinção.
+
+RN_RECONCILIACAO = "RN-021"
+
+RECONCILIACAO_ESTADOS = ("incerto", "enviado", "nao_enviado")
+
+
+def abrir_reconciliacao(
+    *,
+    acao: str,
+    canal: str = "instagram",
+    comment_id: str = "",
+    igsid: str = "",
+    detalhe: str = "",
+) -> int:
+    """Registra um efeito externo cujo resultado NÃO se sabe.
+
+    Não é log: é uma pendência que trava nova tentativa cega no mesmo alvo. Sem
+    isso, "não sei se saiu" vira "mando de novo" — e o cliente recebe duas vezes.
+    """
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO reconciliacao "
+            "(comment_id, igsid, acao, canal, estado, detalhe, criado_em) "
+            "VALUES (?, ?, ?, ?, 'incerto', ?, ?)",
+            (comment_id, igsid, acao, canal, detalhe[:500], time.time()),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def reconciliacao_pendente(comment_id: str = "", igsid: str = "") -> bool:
+    """Existe efeito de resultado desconhecido para este alvo?"""
+    if not (comment_id or igsid):
+        return False
+    with db() as conn:
+        if comment_id:
+            linha = conn.execute(
+                "SELECT 1 FROM reconciliacao WHERE comment_id = ? AND estado = 'incerto' "
+                "LIMIT 1",
+                (comment_id,),
+            ).fetchone()
+        else:
+            linha = conn.execute(
+                "SELECT 1 FROM reconciliacao WHERE igsid = ? AND estado = 'incerto' LIMIT 1",
+                (igsid,),
+            ).fetchone()
+    return linha is not None
+
+
+def reconciliacoes_abertas() -> list[dict]:
+    """Pendências de reconciliação, mais antigas primeiro (ordem de atenção)."""
+    with db() as conn:
+        linhas = conn.execute(
+            "SELECT id, comment_id, igsid, acao, canal, detalhe, criado_em "
+            "FROM reconciliacao WHERE estado = 'incerto' ORDER BY criado_em ASC"
+        ).fetchall()
+    return [dict(linha) for linha in linhas]
+
+
+def resolver_reconciliacao(id: int, *, desfecho: str, por: str = "") -> int:
+    """Fecha a pendência com o que de fato aconteceu (enviado | nao_enviado)."""
+    if desfecho not in ("enviado", "nao_enviado"):
+        raise ValueError("desfecho tem de ser 'enviado' ou 'nao_enviado'")
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE reconciliacao SET estado = ?, resolvido_em = ?, resolvido_por = ? "
+            "WHERE id = ? AND estado = 'incerto'",
+            (desfecho, time.time(), por, id),
+        )
+        return cur.rowcount
+
+
+def tem_interacao_recente(igsid: str, *, janela_segundos: int = DM_WINDOW_SECONDS) -> bool:
+    """A pessoa escreveu para nós dentro da janela? Base da proatividade derivada.
+
+    Lê `inbound.last_seen`, que é a tabela que a própria janela de 24h usa — não
+    `interactions`, que é registro de atendimento e pode não existir para uma
+    mensagem que chegou e ainda não virou linha.
+    """
+    if not igsid:
+        return False
+    corte = time.time() - janela_segundos
+    with db() as conn:
+        linha = conn.execute(
+            "SELECT 1 FROM inbound WHERE igsid = ? AND last_seen > ? LIMIT 1",
+            (igsid, corte),
+        ).fetchone()
+    return linha is not None
 
 
 

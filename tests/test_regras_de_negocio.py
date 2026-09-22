@@ -24,6 +24,10 @@ sys.path.insert(0, str(RAIZ / "plugins" / "instagram-seller"))
 import instagram_api as api  # noqa: E402
 import rules  # noqa: E402
 
+# Ação A3 sempre permitida: usada para não misturar o objeto de cada
+# teste com a matriz de autonomia (RN-009 exige ação declarada — achado F04).
+ACAO_OK = "responder_elogio"
+
 
 class BaseRN(unittest.TestCase):
     """Banco novo por teste. Kill switch garantidamente desligado."""
@@ -96,7 +100,7 @@ class TestRN002MenorDeIdade(BaseRN):
         rules.record_inbound("menor")
         rules.registrar_flag("menor", "menor_idade")
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.send_dm("menor", "O kit sai por R$ 97, te mando o link https://x.com.br/k")
+            api.send_dm("menor", "O kit sai por R$ 97, te mando o link https://x.com.br/k", acao=ACAO_OK)
         self.assertIn("RN-002", str(cm.exception))
         self.assertFalse(self.enviou(), "nada pode sair para menor com oferta")
 
@@ -173,7 +177,7 @@ class TestRN003CriseEmocional(BaseRN):
         rules.record_inbound("crise")
         rules.registrar_flag("crise", "crise_emocional")
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.send_dm("crise", "Tenho uma proposta pra voce: R$ 97")
+            api.send_dm("crise", "Tenho uma proposta pra voce: R$ 97", acao=ACAO_OK)
         self.assertIn("RN-003", str(cm.exception))
         self.assertFalse(self.enviou())
 
@@ -309,7 +313,7 @@ class TestRN007TetoDeFrequencia(BaseRN):
         rules.in_quiet_hours = lambda now=None: True  # type: ignore[assignment]
         try:
             with self.assertRaises(api.PolicyBlock):
-                api.send_dm("lead", "oi", proativo=True)
+                api.send_dm("lead", "oi", proativo=True, acao=ACAO_OK)
         finally:
             rules.in_quiet_hours = self._q  # type: ignore[assignment]
         self.assertEqual(rules.toques_proativos_na_janela("lead"), 0)
@@ -319,7 +323,7 @@ class TestRN007TetoDeFrequencia(BaseRN):
         self._q = rules.in_quiet_hours
         rules.in_quiet_hours = lambda now=None: False  # type: ignore[assignment]
         try:
-            api.send_dm("lead", "oi, tudo bem?", proativo=True)
+            api.send_dm("lead", "oi, tudo bem?", proativo=True, acao=ACAO_OK)
         finally:
             rules.in_quiet_hours = self._q  # type: ignore[assignment]
         self.assertTrue(self.enviou())
@@ -487,21 +491,30 @@ class TestRN010AlegacoesProibidas(BaseRN):
     def test_bloqueia_no_caminho_do_envio(self) -> None:
         rules.record_inbound("lead")
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.send_dm("lead", "Confia, voce vai faturar 6 digitos em 30 dias")
+            api.send_dm("lead", "Confia, voce vai faturar 6 digitos em 30 dias", acao=ACAO_OK)
         self.assertIn("RN-010", str(cm.exception))
         self.assertFalse(self.enviou())
 
     def test_comentario_publico_tambem_passa_pelo_guardrail(self) -> None:
         """É onde a promessa faz mais estrago: fica visível para todo mundo."""
+        rules.record_inbound("lead")
+        # RN-020: comentário precisa de autor registrado para a ação ter vínculo.
+        rules.record_interaction(
+            interaction_id="ig:comentario:comment_id:c1",
+            igsid="lead",
+            channel="comentario",
+            comment_id="c1",
+            recommended_action="responder",
+        )
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.reply_comment_public("c1", "isso vai mudar sua vida!")
+            api.reply_comment_public("c1", "isso vai mudar sua vida!", acao=ACAO_OK)
         self.assertIn("RN-010", str(cm.exception))
         self.assertFalse(self.enviou())
 
     def test_escassez_real_liberada_por_aprovacao(self) -> None:
         rules.registrar_aprovacao("alegacao_escassez_falsa", aprovado_por="edson")
         rules.record_inbound("lead")
-        api.send_dm("lead", "sao as ultimas vagas sim, e verdade")
+        api.send_dm("lead", "sao as ultimas vagas sim, e verdade", acao=ACAO_OK)
         self.assertTrue(self.enviou(), "escassez aprovada precisa poder sair")
 
 
@@ -542,13 +555,13 @@ class TestRN011ConsumidorSemFonte(BaseRN):
     def test_bloqueia_no_caminho_do_envio(self) -> None:
         rules.record_inbound("lead")
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.send_dm("lead", "pode comprar tranquilo, tem garantia de 30 dias")
+            api.send_dm("lead", "pode comprar tranquilo, tem garantia de 30 dias", acao=ACAO_OK)
         self.assertIn("RN-011", str(cm.exception))
         self.assertFalse(self.enviou())
 
     def test_conversa_normal_de_preco_passa(self) -> None:
         rules.record_inbound("lead")
-        api.send_dm("lead", "O valor e R$ 97, sem mensalidade")
+        api.send_dm("lead", "O valor e R$ 97, sem mensalidade", acao=ACAO_OK)
         self.assertTrue(self.enviou())
 
 
@@ -597,7 +610,7 @@ class TestRN012EsperaHumana(BaseRN):
 
         rules.record_inbound("u1")
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.send_dm("u1", "oi de novo")
+            api.send_dm("u1", "oi de novo", acao=ACAO_OK)
         self.assertIn("RN-012", str(cm.exception))
         self.assertFalse(self.enviou())
 
@@ -609,7 +622,7 @@ class TestRN012EsperaHumana(BaseRN):
         self.assertFalse(rules.humano_no_comando("u1"))
         self.assertEqual(rules.flags_ativas("u1"), {})
         rules.record_inbound("u1")
-        api.send_dm("u1", "tudo certo por aqui?")
+        api.send_dm("u1", "tudo certo por aqui?", acao=ACAO_OK)
         self.assertTrue(self.enviou())
 
     def test_resumo_da_fila(self) -> None:
@@ -785,7 +798,7 @@ class TestCarimboDasRegras(BaseRN):
         rules.kill_switch_path().touch()
         rules.record_inbound("u")
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.send_dm("u", "oi")
+            api.send_dm("u", "oi", acao=ACAO_OK)
         self.assertIn(f"[{rules.RN_PARADA_EMERGENCIA}]", str(cm.exception))
         self.assertFalse(self.enviou())
 
@@ -803,7 +816,7 @@ class TestCarimboDasRegras(BaseRN):
         rules.add_opt_out("u", "pediu para sair")
         rules.marcar_despedida_enviada("u")
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.send_dm("u", "voltei!")
+            api.send_dm("u", "voltei!", acao=ACAO_OK)
         self.assertIn(f"[{rules.RN_OPT_OUT}]", str(cm.exception))
         self.assertFalse(self.enviou())
 
@@ -866,7 +879,7 @@ class TestCarimboDasRegras(BaseRN):
         rules.add_opt_out("a", "x")
         rules.marcar_despedida_enviada("a")
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.send_dm("a", "oi de novo")
+            api.send_dm("a", "oi de novo", acao=ACAO_OK)
         self.assertRegex(str(cm.exception), rf"^\[{rules.RN_OPT_OUT}\]")
 
 
@@ -904,7 +917,7 @@ class TestRN019StatusSemFonte(BaseRN):
     def test_bloqueia_no_caminho_do_envio(self) -> None:
         rules.record_inbound("lead")
         with self.assertRaises(api.PolicyBlock) as cm:
-            api.send_dm("lead", "seu pedido ja foi enviado, chega em 3 dias uteis")
+            api.send_dm("lead", "seu pedido ja foi enviado, chega em 3 dias uteis", acao=ACAO_OK)
         self.assertIn(f"[{rules.RN_STATUS_SEM_FONTE}]", str(cm.exception))
         self.assertFalse(self.enviou())
 
@@ -927,18 +940,45 @@ class TestRN019StatusSemFonte(BaseRN):
             with self.subTest(texto=texto):
                 self.assertEqual(rules.detect_afirmacao_status_sem_fonte(texto), [], texto)
 
-    def test_liberado_quando_a_fonte_existe(self) -> None:
-        """O bloqueio é por CONFIGURAÇÃO, não por regra fixa: no dia em que o token
-        existir, ele se desfaz sozinho — sem editar regra nem teste."""
+    def test_token_sozinho_nao_libera_afirmacao_de_status(self) -> None:
+        """Achado F03 do parecer OpenClaw: token preenchido NÃO retira a barreira.
+
+        `credencial ≠ integração funcionando ≠ cliente autorizado ≠ pedido consultado
+        ≠ pagamento confirmado`. Antes, `bling_disponivel()` (token presente) liberava
+        a RN-019 enquanto `consultar_pedido` ainda levantava `NotImplementedError` —
+        bastava um `export` para o agente voltar a poder afirmar status de pedido.
+        """
         self.assertFalse(rules.status_pedido_disponivel())
         rules.record_inbound("lead")
         with self.assertRaises(api.PolicyBlock):
-            api.send_dm("lead", "seu pedido ja foi enviado")
+            api.send_dm("lead", "seu pedido ja foi enviado", acao=ACAO_OK)
 
         os.environ["BLING_API_TOKEN"] = "token-de-teste"
-        self.assertTrue(rules.status_pedido_disponivel())
-        api.send_dm("lead", "seu pedido ja foi enviado")
-        self.assertTrue(self.enviou(), "com fonte configurada, a afirmação precisa passar")
+        # Configurado, mas NÃO implementado: a afirmação continua bloqueada.
+        self.assertFalse(
+            rules.status_pedido_disponivel(),
+            "token não é prova de consulta — o bloqueio não pode cair por credencial",
+        )
+        with self.assertRaises(api.PolicyBlock) as cm:
+            api.send_dm("lead", "seu pedido ja foi enviado", acao=ACAO_OK)
+        self.assertIn(f"[{rules.RN_STATUS_SEM_FONTE}]", str(cm.exception))
+        self.assertFalse(self.enviou())
+
+    def test_liberado_quando_a_capacidade_existe(self) -> None:
+        """O dia em que a leitura existir: liga a CAPACIDADE e o bloqueio cai —
+        sem editar regra e sem tocar em teste."""
+        import integracoes
+
+        os.environ["BLING_API_TOKEN"] = "token-de-teste"
+        integracoes.CAPACIDADES["bling.consultar_pedido"] = True
+        try:
+            self.assertTrue(rules.status_pedido_disponivel())
+            rules.record_inbound("lead")
+            self.chamadas = []
+            api.send_dm("lead", "seu pedido ja foi enviado", acao=ACAO_OK)
+            self.assertTrue(self.enviou(), "com capacidade, a afirmação precisa passar")
+        finally:
+            integracoes.CAPACIDADES["bling.consultar_pedido"] = False
 
     def test_diretiva_deixa_claro_o_que_fazer(self) -> None:
         d = rules.diretiva_sem_integracao()
@@ -979,16 +1019,27 @@ class TestAdaptadoresFailClosed(BaseRN):
                 with self.assertRaises(integracoes.FonteIndisponivel):
                     chamada()
 
-    def test_status_reflete_o_ambiente(self) -> None:
+    def test_status_reflete_o_ambiente_sem_confundir_estados(self) -> None:
+        """Configurado, implementado e autorizado são estados DIFERENTES (F03)."""
         import integracoes
 
-        self.assertEqual(
-            integracoes.status_integracoes(),
-            {"bling": False, "clint": False, "whatsapp": False, "status_de_pedido": False},
-        )
+        vazio = {
+            "bling_configurado": False,
+            "clint_configurado": False,
+            "whatsapp_configurado": False,
+            "bling_consulta": False,
+            "status_de_pedido": False,
+        }
+        self.assertEqual(integracoes.status_integracoes(), vazio)
+
         os.environ["BLING_API_TOKEN"] = "x"
-        self.assertTrue(integracoes.status_integracoes()["bling"])
-        self.assertTrue(integracoes.status_integracoes()["status_de_pedido"])
+        estado = integracoes.status_integracoes()
+        self.assertTrue(estado["bling_configurado"], "o token existe")
+        self.assertFalse(estado["bling_consulta"], "mas a leitura não existe")
+        self.assertFalse(
+            estado["status_de_pedido"],
+            "e por isso a afirmação de status continua proibida",
+        )
 
     def test_com_credencial_a_interface_esta_no_lugar(self) -> None:
         """Com token, a falha passa a ser `NotImplementedError` — prova de que a

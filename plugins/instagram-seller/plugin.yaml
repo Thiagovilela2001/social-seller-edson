@@ -1,5 +1,5 @@
 name: instagram-seller
-version: 0.4.0
+version: 0.5.0
 description: >-
   Ferramentas de envio no Instagram (DM, resposta privada a comentário,
   resposta pública) com as regras da Meta impostas em CÓDIGO — janela de 24h,

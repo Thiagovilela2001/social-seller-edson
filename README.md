@@ -25,8 +25,23 @@ Se o comando não existir, instale primeiro:
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 ```
 
-**2. Acesso a este repositório.** Ele é **privado** — peça para adicionarem você como
-colaborador (no GitHub: *Settings → Collaborators*). Sem isso, o download falha pedindo senha.
+**2. Acesso a este repositório.** Ele é **público** no GitHub — qualquer pessoa com o
+link consegue ler o código, e é assim por decisão do responsável. Baixe direto, sem
+convite:
+
+```bash
+git clone https://github.com/Thiagovilela2001/social-seller-edson.git
+```
+
+> ⚠️ **Consequência de ele ser público.** Nada restrito entra aqui: nenhuma
+> credencial, nenhum dado de cliente, nenhuma lista de preços ou material interno que
+> não possa ser lido por terceiros. O que existe é código, política de comportamento
+> do agente e documentação técnica. As credenciais ficam no `.env` da máquina — e o
+> `.gitignore` bloqueia as extensões que as carregam.
+>
+> Isto corrige o achado **F10** do Parecer OpenClaw 1.0: a documentação dizia
+> "privado" enquanto a API já respondia "público". Documento que descreve o repositório
+> errado é o tipo de incoerência que este projeto inteiro tenta evitar.
 
 **3. As credenciais na mão.** Ele não funciona sem elas, e você consegue todas aqui:
 
@@ -247,7 +262,7 @@ Suas credenciais, memórias e conversas **não são tocadas**. Só o agente em s
 
 | O que você vê | O que fazer |
 |---|---|
-| `403` ou pedido de senha no install | Você não tem acesso ao repositório. Peça para adicionar você como colaborador. |
+| `403` ou pedido de senha no install | A URL está errada, ou o repositório foi tornado privado. Confirme o link `github.com/Thiagovilela2001/social-seller-edson`. |
 | `disabled` em vez de `enabled` no passo 3 | Rode `hermes -p social-seller-edson plugins doctor "<Path>/plugins/instagram-seller" --ci` |
 | O agente responde como assistente genérico | A personalidade não carregou. Avise quem te entregou. |
 | Nada é enviado no Instagram | Provavelmente a janela de 24h (o Instagram só permite responder quem falou primeiro) ou o kill switch ligado. |

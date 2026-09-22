@@ -38,6 +38,33 @@ class FonteIndisponivel(RuntimeError):
         self.o_que = o_que
 
 
+# --------------------------------------------------------------------------
+# CAPACIDADES — o que existe de verdade, separado do que está configurado
+#
+# O parecer OpenClaw (F03) apontou o defeito: credencial preenchida liberava a
+# RN-019 enquanto a consulta ainda era `NotImplementedError`. Estas chaves são a
+# resposta honesta e são a ÚNICA forma de liberar afirmação transacional. Ligar uma
+# capacidade é o passo que falta depois de implementar e homologar a leitura — não
+# o `export` de um token.
+# --------------------------------------------------------------------------
+
+CAPACIDADES: dict[str, bool] = {
+    # Consultas transacionais — nenhuma implementada hoje.
+    "bling.consultar_pedido": False,
+    "bling.consultar_rastreio": False,
+    "bling.evidencia_pagamento": False,
+    "clint.vinculo_do_cliente": False,
+    "clint.contexto_do_cliente": False,
+    # Envios por outros canais — nenhum implementado hoje.
+    "whatsapp.enviar": False,
+    "email.enviar": False,
+    # Moderação executável — preparada no motor, sem ferramenta no plugin.
+    "meta.ocultar_comentario": False,
+    "meta.excluir_comentario": False,
+    "meta.reexibir_comentario": False,
+}
+
+
 def _configurada(variavel: str) -> bool:
     return bool((os.getenv(variavel) or "").strip())
 
@@ -62,20 +89,57 @@ def whatsapp_disponivel() -> bool:
 
 
 def status_pedido_disponivel() -> bool:
-    """Há alguma fonte para afirmar status de pedido, pagamento ou rastreio?
+    """Há fonte CONFIÁVEL para afirmar status de pedido, pagamento ou rastreio?
 
-    É esta função que a RN-019 consulta. Enquanto devolver False, o agente não pode
-    afirmar status — nem inventar, nem "achar que provavelmente já saiu".
+    A distinção obrigatória do parecer OpenClaw (F03):
+
+        credencial preenchida ≠ integração funcionando ≠ cliente autorizado
+        ≠ pedido consultado ≠ pagamento confirmado
+
+    Antes desta correção, `bling_disponivel()` (token preenchido) liberava a RN-019
+    enquanto `consultar_pedido` ainda levantava `NotImplementedError`. Bastava pôr um
+    token no `.env` para **retirar a barreira** e o agente voltar a poder afirmar
+    status sem que nenhuma consulta existisse.
+
+    Agora o portão é a CAPACIDADE, não a credencial: `bling_disponivel()` responde
+    "está configurado"; `status_pedido_disponivel()` responde "posso afirmar com
+    evidência". Sem leitura implementada a capacidade é False, e nenhum token muda
+    isso.
     """
-    return bling_disponivel()
+    return CAPACIDADES.get("bling.consultar_pedido", False) and bling_disponivel()
+
+
+def bling_saudavel() -> bool:
+    """A integração respondeu de verdade nas últimas verificações?
+
+    Hoje sempre False: não há leitura implementada. Existe separado de
+    `bling_disponivel()` porque, quando houver, "configurado mas fora do ar" precisa
+    ser um estado próprio — e não pode virar informação positiva nem negativa de
+    pagamento.
+    """
+    return CAPACIDADES.get("bling.consultar_pedido", False)
+
+
+def CAPACIDADE_IMPLEMENTADA(nome: str) -> bool:  # noqa: N802 - vocabulário do parecer
+    return bool(CAPACIDADES.get(nome, False))
 
 
 def status_integracoes() -> dict[str, bool]:
-    """Retrato honesto do que existe, para o briefing e para o handover."""
+    """Retrato honesto do que existe, para o briefing e para o handover.
+
+    Separa CONFIGURADO de IMPLEMENTADO de propósito (achado F03 do parecer OpenClaw:
+    "credencial preenchida ≠ integração funcionando"). Quem lê isto precisa poder
+    distinguir "falta o token" de "o token está lá e a leitura não existe" — são
+    pendências diferentes, com responsáveis diferentes.
+    """
     return {
-        "bling": bling_disponivel(),
-        "clint": clint_disponivel(),
-        "whatsapp": whatsapp_disponivel(),
+        # CONFIGURADO: a credencial está no ambiente.
+        "bling_configurado": bling_disponivel(),
+        "clint_configurado": clint_disponivel(),
+        "whatsapp_configurado": whatsapp_disponivel(),
+        # IMPLEMENTADO: existe leitura de verdade. É o que autoriza afirmar algo.
+        "bling_consulta": CAPACIDADES.get("bling.consultar_pedido", False),
+        # AUTORIZADO A AFIRMAR: configurado E implementado. Só isto libera a RN-019.
         "status_de_pedido": status_pedido_disponivel(),
     }
 

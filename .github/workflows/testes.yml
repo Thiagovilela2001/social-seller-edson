@@ -1,0 +1,32 @@
+name: testes
+
+# O parecer OpenClaw (seção 07) registrou "0 execuções" no GitHub Actions para o
+# commit revisado. Um número em documentação não é homologação — e enquanto a suíte
+# só roda na máquina de quem escreveu, "189 testes" é afirmação, não prova.
+#
+# Este workflow existe para que o número passe a ser verificável por terceiros: cada
+# push e cada PR roda a suíte completa e o resultado fica registrado.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  suite:
+    name: suíte completa
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Sem `pip install`: a suíte é stdlib pura e roda sem rede e sem credencial.
+      # Isso é requisito do projeto (o parecer cobra homologação; a suíte tem de
+      # poder rodar em ambiente limpo sem token nenhum).
+      - name: Suíte de testes
+        run: python -m unittest discover -s tests -v

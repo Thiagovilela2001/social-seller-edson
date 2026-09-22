@@ -20,6 +20,7 @@ try:
     from . import schemas
     from .instagram_api import (
         PolicyBlock,
+        ResultadoIncerto,
         _hermes_home,
         reply_comment_public,
         send_dm,
@@ -29,6 +30,7 @@ except ImportError:  # pragma: no cover - somente no harness
     import schemas  # type: ignore[no-redef]
     from instagram_api import (  # type: ignore[no-redef]
         PolicyBlock,
+        ResultadoIncerto,
         _hermes_home,
         reply_comment_public,
         send_dm,
@@ -41,6 +43,41 @@ except ImportError:  # pragma: no cover - somente no harness
 
 BLOCKED_BY_POLICY = "blocked_by_policy"
 TOOL_ERROR = "tool_error"
+# O envio saiu e NÃO se sabe se chegou (RN-021). Código próprio porque a ação do
+# agente é diferente de todos os outros erros: aqui ele NÃO repete.
+RESULTADO_INCERTO = "resultado_incerto"
+
+MENSAGEM_INCERTO = (
+    "NÃO REPITA ESTE ENVIO. A chamada foi feita e não se sabe se chegou (RN-021). "
+    "A pendência ficou registrada para conferência humana e trava nova tentativa no "
+    "mesmo alvo — repetir no escuro pode duplicar a resposta ao cliente."
+)
+
+
+def _acao_obrigatoria(params) -> tuple[str, str]:
+    """(acao, erro). O vocabulário fechado é conferido no motor; aqui, a presença.
+
+    Achado F04 do parecer OpenClaw: com `acao` opcional, OMITIR o campo desligava a
+    matriz de autonomia — a decisão de quais permissões se aplicam saía do próprio
+    pedido que estava sendo autorizado.
+    """
+    acao = (params.get("acao") or "").strip()
+    if not acao:
+        return "", (
+            "Parâmetro obrigatório ausente: acao. Omissão não é autorização (RN-009) — "
+            "declare uma ação do vocabulário fechado."
+        )
+    return acao, ""
+
+
+def _proatividade_obrigatoria(params) -> tuple[bool, str]:
+    """(proativo, erro). Omitir `proativo` seria silenciar RN-006/RN-007."""
+    if "proativo" not in params or params.get("proativo") is None:
+        return False, (
+            "Parâmetro obrigatório ausente: proativo. Sem ele a abordagem não teria "
+            "horário nem cota (RN-006/RN-007) — e o padrão silencioso esconderia isso."
+        )
+    return bool(params.get("proativo")), ""
 
 
 def _ok(payload: dict) -> str:
@@ -68,6 +105,14 @@ def register(ctx):
                 BLOCKED_BY_POLICY,
                 "Mensagem longa demais para DM. Quebre em até 2 mensagens de 3 linhas.",
             )
+        # F04: proatividade e ação são OBRIGATÓRIAS. Omitir não é autorização, e um
+        # padrão silencioso (False/"") esconderia a omissão em vez de recusá-la.
+        proativo, erro = _proatividade_obrigatoria(params)
+        if erro:
+            return _err(TOOL_ERROR, erro)
+        acao, erro = _acao_obrigatoria(params)
+        if erro:
+            return _err(TOOL_ERROR, erro)
         try:
             result = send_dm(
                 params["igsid"],
@@ -75,12 +120,14 @@ def register(ctx):
                 # `proativo` liga as RN-006/RN-007 (horário humano + teto de
                 # toques). Sem isso, uma abordagem de follow-up não teria hora
                 # nem cota — e ninguém perceberia até o primeiro unfollow.
-                proativo=bool(params.get("proativo")),
+                proativo=proativo,
                 # `acao` é o vocabulário de NIVEL_AUTONOMIA (RN-009).
-                acao=(params.get("acao") or "").strip(),
+                acao=acao,
             )
         except PolicyBlock as e:
             return _err(BLOCKED_BY_POLICY, str(e))
+        except ResultadoIncerto as e:
+            return _err(RESULTADO_INCERTO, f"{MENSAGEM_INCERTO} Detalhe: {e}")
         except KeyError as e:
             return _err(TOOL_ERROR, f"Parâmetro obrigatório ausente: {e}")
         except Exception as e:  # noqa: BLE001 — devolver erro é melhor que quebrar o turno
@@ -101,12 +148,18 @@ def register(ctx):
                 "O link vai na DM depois que a pessoa responder.",
             )
 
+        acao, erro = _acao_obrigatoria(params)
+        if erro:
+            return _err(TOOL_ERROR, erro)
         try:
-            result = send_private_reply(
-                params["comment_id"], text, acao=(params.get("acao") or "").strip()
-            )
+            # A identidade NÃO vem daqui: `send_private_reply` resolve o autor pelo
+            # comentário (RN-020). Antes, este handler não passava igsid nenhum — e o
+            # motor, que conhecia as restrições, não tinha a quem aplicá-las.
+            result = send_private_reply(params["comment_id"], text, acao=acao)
         except PolicyBlock as e:
             return _err(BLOCKED_BY_POLICY, str(e))
+        except ResultadoIncerto as e:
+            return _err(RESULTADO_INCERTO, f"{MENSAGEM_INCERTO} Detalhe: {e}")
         except KeyError as e:
             return _err(TOOL_ERROR, f"Parâmetro obrigatório ausente: {e}")
         except Exception as e:  # noqa: BLE001
@@ -121,14 +174,19 @@ def register(ctx):
 
     def handle_reply_comment(params, **kwargs):
         del kwargs
+        acao, erro = _acao_obrigatoria(params)
+        if erro:
+            return _err(TOOL_ERROR, erro)
         try:
             result = reply_comment_public(
                 params["comment_id"],
                 (params.get("text") or "").strip(),
-                acao=(params.get("acao") or "").strip(),
+                acao=acao,
             )
         except PolicyBlock as e:
             return _err(BLOCKED_BY_POLICY, str(e))
+        except ResultadoIncerto as e:
+            return _err(RESULTADO_INCERTO, f"{MENSAGEM_INCERTO} Detalhe: {e}")
         except KeyError as e:
             return _err(TOOL_ERROR, f"Parâmetro obrigatório ausente: {e}")
         except Exception as e:  # noqa: BLE001

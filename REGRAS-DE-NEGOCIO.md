@@ -1,6 +1,6 @@
 # REGRAS DE NEGÓCIO — Agente Social Seller (Edson)
 
-**Versão:** 2.2.0 · **Motor:** `plugins/instagram-seller/rules.py` (`RULES_VERSION = "2.2.0"`)
+**Versão:** 2.3.0 · **Motor:** `plugins/instagram-seller/rules.py` (`RULES_VERSION = "2.3.0"`)
 **Base:** Documento Mestre do Agente v2.0 (21/09/2026, 33 pp.) + `agents/docs/05-limites-e-aprovacao-humana.md` + LGPD (Lei 13.709/2018)
 **Status:** implementado em código e coberto por testes (`tests/test_regras_de_negocio.py` + `tests/test_lgpd.py`)
 
@@ -496,6 +496,53 @@ não existe.
 
 **Pendência 10** é o que falta para esta regra virar recurso.
 
+## RN-020 — Vínculo de identidade antes da ação
+
+- **Texto:** nenhuma ação que dependa de quem é a pessoa acontece sem vínculo
+  confiável entre a ação e o titular. O autor é resolvido **no servidor**, a partir do
+  registro do evento — nunca confiado a quem chamou a ferramenta.
+- **Escopo:** todas as rotas de comentário (resposta privada e resposta pública) e
+  qualquer ação futura de outro canal.
+- **Autonomia:** A0 — não existe nível em que uma ação identificada rode sem vínculo.
+- **Exceção:** nenhuma. Ausência de vínculo **bloqueia**; não é "seguir com cautela".
+- **Violação:** o motor conhece a restrição (opt-out, flag sensível, humano no
+  comando) e a ferramenta chega sem a quem aplicá-la. Na prática: a pessoa que pediu
+  para não ser contatada volta a ser contatada.
+- **Imposição:** CÓDIGO (`rules.vinculo_resolver` no caminho do envio,
+  `instagram_api._resolver_vinculo`) + PROMPT.
+- **Origem:** achado **F02** do Parecer OpenClaw 1.0. Antes, `igsid` era parâmetro com
+  valor vazio por padrão e as verificações eram puladas em silêncio (`if igsid:`).
+
+Três motivos reprovam o vínculo, e cada um sai **carimbado** no log com sua chave:
+
+| Motivo | Quando |
+|---|---|
+| `comentario_sem_vinculo` | Comentário sem registro de autor, ou registro sem autor |
+| `alvo_de_outra_pessoa` | O igsid declarado não é o dono do comentário (**critério T06**: comentário de terceiro não é alvo) |
+
+## RN-021 — Efeito externo com resultado desconhecido
+
+- **Texto:** "não sei se saiu" é um estado próprio. O agente não repete o envio e
+  ninguém assume que saiu ou que não saiu sem conferir.
+- **Escopo:** todo envio que atravessa a rede (DM, private reply).
+- **Autonomia:** A0 para repetir; o desfecho é resolvido por humano.
+- **Exceção:** nenhuma.
+- **Violação:** repetir no escuro duplica a resposta ao cliente; não repetir sem
+  registro deixa o cliente sem resposta e ninguém sabe que ficou.
+- **Imposição:** CÓDIGO (`rules.abrir_reconciliacao`, `reconciliacao_pendente`,
+  `instagram_api.ResultadoIncerto`).
+- **Origem:** achados **F01** e **F05** do Parecer OpenClaw 1.0. Antes, a cota da
+  private reply era marcada **antes** da chamada: uma falha de rede era tratada como
+  envio consumado.
+
+Desfechos possíveis de uma chamada:
+
+| Desfecho | O que a regra faz |
+|---|---|
+| Envio confirmado | Marca a cota e registra a execução |
+| **Recusa confirmada** da Meta (4xx) | A cota foi consumida de fato: marca e propaga o erro |
+| **Resultado desconhecido** (timeout/rede) | **Não** marca, abre pendência rastreável, e a próxima tentativa no mesmo alvo é bloqueada até alguém resolver |
+
 ---
 
 ## Pendências — o que o código não pode decidir
@@ -522,6 +569,7 @@ Nenhum destes itens é técnico. Todos mudam o que o agente faz na cara do clien
 
 | Versão | O que mudou |
 |---|---|
+| **2.3.0** | **Parecer OpenClaw 1.0.** Entram a **RN-020** (vínculo de identidade antes da ação) e a **RN-021** (efeito externo com resultado desconhecido). Corrige os bloqueadores: **F01** (a resposta privada usava a chamada da pública e publicava como comentário), **F02** (identidade vazia nas rotas de comentário pulava as verificações), **F03** (token preenchido liberava afirmação de status sem consulta) e **F04** (ação e proatividade autodeclaradas e opcionais). |
 | **2.2.0** | Entra a **RN-019** (status de pedido/pagamento/rastreio só com fonte consultada) e os adaptadores fail-closed em `integracoes.py`. A **RN-008** passa a ter três modos (`nunca` \| `sob_pergunta` \| `sempre`), com `sob_pergunta` como padrão decidido — o agente não mente se perguntarem e não se anuncia sozinho. |
 | **2.1.0** | Entra a seção de **PROTEÇÃO DE DADOS** (RN-014..RN-018): prazo de guarda por tabela, expurgo que roda, minimização do texto, direito de acesso e eliminação, e relatório sem dado pessoal. Corrige o vazamento do texto da crise na fila humana. |
 | **2.0.0** | Entra a seção REGRAS DE NEGÓCIO (RN-001..RN-013), com o identificador carimbado em todo bloqueio de envio. |
@@ -532,7 +580,7 @@ Nenhum destes itens é técnico. Todos mudam o que o agente faz na cara do clien
 ## Como verificar que estas regras estão de pé
 
 ```bash
-python -m unittest discover -s tests          # 189 testes (71 originais + 118 destas regras)
+python -m unittest discover -s tests          # 205 testes (71 originais + 134 destas regras)
 python -m unittest tests.test_regras_de_negocio -v   # RN-001..RN-013 e RN-019
 python -m unittest tests.test_lgpd -v                # RN-014..RN-018 (proteção de dados)
 python -m unittest tests.test_intake -v              # a LIGAÇÃO: o briefing que chega ao agente

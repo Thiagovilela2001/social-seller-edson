@@ -33,7 +33,7 @@ social-seller-edson/
 ├── scripts/
 │   ├── instagram-intake.py      # intake da rota: roda ANTES do LLM, falha fechado
 │   └── fila-humana-sla.py       # vigia da fila humana (RN-012): quem passou do prazo
-├── tests/                       # 189 testes — NÃO viaja (artefato de desenvolvimento)
+├── tests/                       # 205 testes — NÃO viaja (artefato de desenvolvimento)
 └── deploy/                      # infra do cliente: proxy de borda, TLS, hook de shell
 ```
 
@@ -105,8 +105,13 @@ PDF §06 proíbe ("confiança não substitui uma regra").
 ### Rodar os testes
 
 ```bash
-python -m unittest discover -s tests        # 189 testes, ~21s, sem rede e sem chave de API
+python -m unittest discover -s tests        # 205 testes, ~10s, sem rede e sem chave de API
 ```
+
+A mesma suíte roda no GitHub Actions a cada push e PR
+(`.github/workflows/testes.yml`) — o parecer OpenClaw registrou "0 execuções" no
+Actions, e número em documentação não é homologação enquanto só roda na máquina de
+quem escreveu.
 
 | Arquivo | Cobre |
 |---|---|
@@ -252,7 +257,7 @@ Repositório **privado**. É código comercial + configuração de cliente.
 
 ## Verificação antes de cada release
 
-- [ ] `python -m unittest discover -s tests` → **189 testes, OK**
+- [ ] `python -m unittest discover -s tests` → **205 testes, OK**
 - [ ] `hermes profile install ./social-seller-edson --name sse-teste -y` funciona
 - [ ] `plugins doctor` → `3 tool(s), 1 hook(s)`
 - [ ] `cron list` → os jobs presentes e pausados
